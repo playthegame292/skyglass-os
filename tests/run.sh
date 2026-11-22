@@ -129,10 +129,12 @@ post /api/pin/set '{"new":"12"}' | grep -q '"ok": false' && ok "too-short PIN re
 post /api/pin/set '{"new":"2468"}' | grep -q '"ok": true' && ok "PIN set" || bad "PIN set"
 post /api/pin/verify '{"pin":"0000"}' | grep -q '"ok": false' && ok "wrong PIN rejected" || bad "wrong PIN accepted!"
 post /api/pin/verify '{"pin":"2468"}' | grep -q '"ok": true' && ok "right PIN accepted" || bad "right PIN rejected"
-post /api/pin/set '{"old":"9999","new":"1357"}' | grep -q '"ok": false' && ok "PIN change needs the old PIN" || bad "PIN changed without old PIN!"
+# right after a good PIN (the wrong-try counter is at 0): this one wrong try can't add up to a lockout
 cp "$TMPH/.config/skyglass/pin.json" "$TMPH/pin.bak"; printf '{"salt": "x", "ha' >"$TMPH/.config/skyglass/pin.json"
 get /api/pin | grep -q '"set": true' && post /api/pin/verify '{"pin":"2468"}' | grep -q '"ok": false' && ok "a damaged PIN file keeps the phone locked" || bad "a damaged PIN file unlocks the phone!"
 mv "$TMPH/pin.bak" "$TMPH/.config/skyglass/pin.json"
+post /api/pin/verify '{"pin":"2468"}' >/dev/null   # a right PIN resets the wrong-try counter (it lives in the backend's memory)
+post /api/pin/set '{"old":"9999","new":"1357"}' | grep -q '"ok": false' && ok "PIN change needs the old PIN" || bad "PIN changed without old PIN!"
 post /api/pin/verify '{"pin":["not","a","string"]}' | python3 -c 'import sys,json; json.load(sys.stdin)' && ok "garbage input handled" || bad "garbage input crashed a request"
 curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{not json' "127.0.0.1:$PORT/api/pin/verify" | grep -q '"ok"' && ok "malformed JSON handled" || bad "malformed JSON"
 WP="$ROOT/rootfs/usr/share/skyglass/wallpapers/aero-lagoon.jpg"
