@@ -66,7 +66,9 @@ systemctl is-enabled --quiet skyglass-repair 2>/dev/null && pass "self-repair ru
   || fail "no known-good copy to repair from" "re-run install-on-pi.sh (or: skyglass-update --reinstall)"
 rc=$(sudo -n skyglass-repair --check 2>/dev/null | grep -v "all good" | sed 's/^skyglass-repair: //')
 [ -z "$rc" ] && pass "all Skyglass files intact" || fail "$rc" "sudo skyglass-repair"
-[ -d /var/log/journal ] && pass "system log kept across reboots (shows what happened before a power cut)" || fail "system log is lost at every reboot" "sudo mkdir -p /var/log/journal && sudo systemctl restart systemd-journald"
+# the folder alone isn't enough (Raspberry Pi OS sets Storage=volatile): check where journald really writes
+ls /var/log/journal/*/system.journal >/dev/null 2>&1 && pass "system log kept across reboots (shows what happened before a power cut)" \
+  || fail "system log is lost at every reboot" "sudo systemctl restart systemd-journald (Storage=persistent is in /etc/systemd/journald.conf.d/skyglass.conf)"
 
 echo "RGB LED (optional):"
 if systemctl is-active --quiet skyglass-led 2>/dev/null; then

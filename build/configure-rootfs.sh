@@ -110,6 +110,8 @@ mkdir -p "$STATE/boot-backup"
 for f in config.txt cmdline.txt; do [ -s "$BOOT/$f" ] && cp "$BOOT/$f" "$STATE/boot-backup/$f"; done
 [ -f /etc/skyglass/update.conf ] || cp /usr/share/skyglass/update.conf.default /etc/skyglass/update.conf
 # keep the system log across reboots: after a power cut it shows what happened before
+# (Storage=persistent in journald.conf.d/skyglass.conf)
 mkdir -p /var/log/journal
+systemctl restart systemd-journald 2>/dev/null && journalctl --flush 2>/dev/null || true
 
 echo ">> Skyglass configured"
