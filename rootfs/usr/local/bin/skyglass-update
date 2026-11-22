@@ -10,6 +10,10 @@
 # the release, runs its install-on-pi.sh (packages + files), and keeps the release as the
 # known-good copy that skyglass-repair restores damaged files from. The previous version is
 # kept for --rollback. Debian's own packages update separately (Settings › Software updates).
+# The whole script sits in { ... } and ends with exit: bash reads all of it before running any of
+# it. An update replaces this very file while it runs, and bash otherwise reads scripts bit by
+# bit, which crashed the end of an update ("unexpected EOF") and skipped the screen restart.
+{
 set -uo pipefail
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"   # may ask for your password (Settings: Software updates never does)
 CONF=/etc/skyglass/update.conf
@@ -81,3 +85,4 @@ say "Skyglass $LATEST installed. The screen restarts to load it."
 skyglass-notify -a Updates -u low "Skyglass $LATEST installed" "Updated from GitHub." >/dev/null 2>&1
 restart_ui
 exit 0
+}

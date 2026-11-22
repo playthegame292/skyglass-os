@@ -48,6 +48,17 @@ grep -q 'NOPASSWD: /usr/local/sbin/skyglass-priv" ;;' rootfs/usr/local/sbin/skyg
   && ok "the backend only uses root through skyglass-priv" || bad "the backend runs a raw command as root (use skyglass-priv)"
 find rootfs -name __pycache__ -exec rm -rf {} + 2>/dev/null
 
+# the updater replaces itself while running: its body must be one { ... } block bash reads whole
+python3 - <<'PYEOF' && ok "skyglass-update survives replacing itself (read whole before running)" || bad "skyglass-update would crash when an update replaces it"
+import re, sys
+src = open("rootfs/usr/local/bin/skyglass-update").read().rstrip().split("\n")
+code = [l for l in src if l.strip() and not l.lstrip().startswith("#")]
+sys.exit(0 if code[-1] == "}" and any(l == "{" for l in code[:6]) else 1)
+PYEOF
+T=$(mktemp -d); printf '#!/bin/bash\n{\ncp "$1" "$0"\necho survived\nexit 0\n}\n' >"$T/s.sh"
+printf '#!/bin/bash\n# a much longer replacement %s\necho replaced-version\n' "$(head -c 400 /dev/zero | tr '\0' x)" >"$T/new.sh"
+[ "$(bash "$T/s.sh" "$T/new.sh" 2>&1)" = survived ] && ok "a { } wrapped script finishes even when replaced mid-run" || bad "self-replacing script crashed"; rm -rf "$T"
+
 echo "Self-repair"
 R=$(mktemp -d)
 mkdir -p "$R/state/source/rootfs$R/sys" "$R/sys" "$R/boot"
