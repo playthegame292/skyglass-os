@@ -17,7 +17,9 @@ VAR=/var/lib/waydroid
 g=$'\e[32m'; y=$'\e[33m'; r=$'\e[31m'; n=$'\e[0m'
 say() { echo "${g}==>${n} $*"; }
 die() { echo "${r}✘${n} $*" >&2; exit 1; }
-as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
+as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }   # setup: may ask for your password
+# starting/stopping Android from the phone's UI: through skyglass-priv, never needs a password
+container() { if [ "$(id -u)" = 0 ]; then systemctl "$1" waydroid-container.service; else sudo -n /usr/local/sbin/skyglass-priv waydroid-container "$1"; fi; }
 
 pagesize() { getconf PAGESIZE; }
 binder_ok() { grep -qw binder /proc/filesystems || [ -e /dev/binder ] || [ -d /dev/binderfs ]; }
@@ -104,7 +106,7 @@ setup() {
 }
 
 start_android() {
-  as_root systemctl start waydroid-container.service || die "the Android container did not start (run: skyglass-android status)"
+  container start || die "the Android container did not start (run: skyglass-android status)"
   running && return 0
   (waydroid session start >/dev/null 2>&1 &)
   for _ in $(seq 90); do
@@ -154,7 +156,7 @@ install_apk() {
 
 stop_android() {
   waydroid session stop >/dev/null 2>&1
-  as_root systemctl stop waydroid-container.service 2>/dev/null
+  container stop 2>/dev/null
   return 0
 }
 

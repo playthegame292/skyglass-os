@@ -1,2 +1,0 @@
-# Skyglass OS: the phone's owner is root. No password prompts, ever.
-skyglass ALL=(ALL:ALL) NOPASSWD: ALL

@@ -1,0 +1,58 @@
+#!/bin/bash
+# skyglass-sudo-mode: does sudo ask the phone's user for a password?
+#
+#   skyglass-sudo-mode status        prints: full|strict password-set|no-password
+#   skyglass-sudo-mode strict        sudo asks for your password. The phone's own functions keep
+#                                    working through skyglass-priv (a short list of checked actions).
+#                                    Needs a password: set one first (set-password).
+#   skyglass-sudo-mode full          sudo never asks (how Skyglass starts out)
+#   skyglass-sudo-mode set-password  reads the new password from stdin
+#   skyglass-sudo-mode init          first install: passwordless, unless a choice exists already
+#
+# This command is NOT on the no-password list: in strict mode, running it needs your password,
+# so nothing running on the phone can quietly switch the protection off again.
+set -uo pipefail
+F=/etc/sudoers.d/010-skyglass
+U=${SKYGLASS_USER:-$(sed -n 's/^\([a-z_][a-z0-9_-]*\) ALL=.*/\1/p' $F 2>/dev/null | head -1)}
+U=${U:-skyglass}
+die() { echo "skyglass-sudo-mode: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "needs root (sudo)"
+id "$U" >/dev/null 2>&1 || die "no user '$U'"
+
+template() {
+  case "$1" in
+    full) printf '%s\n' "# Skyglass OS: the phone's owner is root. sudo never asks for a password." \
+                        "# Change it in Settings › Developer › Root access (or: sudo skyglass-sudo-mode strict)." \
+                        "$U ALL=(ALL:ALL) NOPASSWD: ALL" ;;
+    strict) printf '%s\n' "# Skyglass OS: sudo asks for your password. Only skyglass-priv, a short list of checked" \
+                          "# actions the phone itself needs (brightness, USB drives, updates...), runs without it." \
+                          "# Change it in Settings › Developer › Root access (or: sudo skyglass-sudo-mode full)." \
+                          "$U ALL=(ALL:ALL) ALL" \
+                          "$U ALL=(root) NOPASSWD: /usr/local/sbin/skyglass-priv" ;;
+  esac
+}
+install_mode() {
+  local tmp; tmp=$(mktemp /etc/sudoers.d/.skyglass.XXXXXX) || die "can't write /etc/sudoers.d"
+  template "$1" >"$tmp"; chmod 0440 "$tmp"
+  visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; die "the new sudo rules didn't check out: nothing changed"; }
+  mv -f "$tmp" "$F"
+}
+has_password() { [ "$(passwd -S "$U" 2>/dev/null | awk '{print $2}')" = P ]; }
+mode() { grep -q 'NOPASSWD: ALL' $F 2>/dev/null && echo full || echo strict; }
+
+case "${1:-status}" in
+  status) echo "$(mode) $(has_password && echo password-set || echo no-password)" ;;
+  print) template "${2:-full}" ;;
+  init) [ -f $F ] && visudo -cf $F >/dev/null 2>&1 || install_mode full ;;
+  full) install_mode full; echo "sudo no longer asks for a password" ;;
+  strict)
+    has_password || die "set a password first: without one, nobody could use sudo any more"
+    install_mode strict; echo "sudo now asks for your password" ;;
+  set-password)
+    IFS= read -r pw || die "no password given"
+    [ ${#pw} -ge 6 ] || die "the password needs at least 6 characters"
+    case "$pw" in *:*) die "the password can't contain ':'" ;; esac
+    printf '%s:%s\n' "$U" "$pw" | chpasswd || die "couldn't set the password"
+    echo "password set" ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

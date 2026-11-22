@@ -50,7 +50,10 @@ id "$U" >/dev/null 2>&1 && pass "user '$U' exists" || fail "user '$U' missing" "
 for grp in video render input; do
   id -nG "$U" 2>/dev/null | grep -qw "$grp" && pass "$U is in group $grp" || fail "$U not in group $grp" "sudo usermod -aG $grp $U && sudo reboot"
 done
-sudo -n -u "$U" sudo -n true 2>/dev/null && pass "passwordless sudo works" || fail "sudo asks for a password" "check /etc/sudoers.d/010-skyglass (must be owned by root, mode 0440)"
+# sudo: passwordless, or asking for a password with skyglass-priv for the phone's own jobs
+if sudo -n -u "$U" sudo -n true 2>/dev/null; then pass "sudo: passwordless (change it in Settings › Developer › Root access)"
+elif sudo -n -u "$U" sudo -n /usr/local/sbin/skyglass-priv ping >/dev/null 2>&1; then pass "sudo asks for a password; the phone's own jobs work through skyglass-priv"
+else fail "the phone can't use root: brightness, USB drives and updates won't work" "sudo skyglass-sudo-mode strict  (or full), then check /etc/sudoers.d/010-skyglass"; fi
 systemctl cat getty@tty1 2>/dev/null | grep -q -- "--autologin $U" && pass "autologin on the touchscreen" || fail "autologin not set" "re-run install-on-pi.sh"
 
 echo "Skyglass:"
@@ -66,7 +69,7 @@ echo "Self-repair & updates:"
 systemctl is-enabled --quiet skyglass-repair 2>/dev/null && pass "self-repair runs at every boot" || fail "self-repair is off" "sudo systemctl enable skyglass-repair"
 [ -s /var/lib/skyglass/manifest.sha256 ] && [ -d /var/lib/skyglass/source/rootfs ] && pass "known-good copy of Skyglass $(cat /var/lib/skyglass/source/VERSION 2>/dev/null) for repairs" \
   || fail "no known-good copy to repair from" "re-run install-on-pi.sh (or: skyglass-update --reinstall)"
-rc=$(sudo -n skyglass-repair --check 2>/dev/null | grep -v "all good" | sed 's/^skyglass-repair: //')
+rc=$(sudo -n /usr/local/sbin/skyglass-priv repair-check 2>/dev/null | grep -v "all good" | sed 's/^skyglass-repair: //')
 [ -z "$rc" ] && pass "all Skyglass files intact" || fail "$rc" "sudo skyglass-repair"
 # the folder alone isn't enough (Raspberry Pi OS sets Storage=volatile): check where journald really writes
 ls /var/log/journal/*/system.journal >/dev/null 2>&1 && pass "system log kept across reboots (shows what happened before a power cut)" \

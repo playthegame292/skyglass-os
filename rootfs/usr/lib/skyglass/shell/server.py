@@ -47,6 +47,15 @@ VIDEOS = os.path.join(HOME, "Videos", "Skyglass")
 
 # --------------------------------------------------------------------------- helpers
 
+PRIV = "/usr/local/sbin/skyglass-priv"
+
+
+def priv(*args, timeout=30):
+    """Root actions go through skyglass-priv: a fixed list of checked actions. It's the only thing
+    that still runs without a password when sudo is set to ask for one (Settings › Developer)."""
+    return run(["sudo", "-n", PRIV] + [str(a) for a in args], timeout=timeout)
+
+
 def run(cmd, timeout=10, input=None):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=input)
@@ -319,9 +328,18 @@ def pin_load():
     try:
         with open(PIN_FILE) as f:
             d = json.load(f)
-        return d if d.get("hash") and d.get("salt") else None
-    except (OSError, ValueError):
+        if isinstance(d, dict) and d.get("hash") and d.get("salt"):
+            return d
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError):
+        pass
+    if os.path.exists(PIN_FILE):
+        # A damaged PIN file must keep the phone locked (no PIN matches), never unlock it.
+        # Reset it from a keyboard or SSH: skyglass-pin reset
+        print("pin.json is damaged: the phone stays locked until skyglass-pin reset", flush=True)
+        return {"salt": "00", "hash": "-", "damaged": True}   # no PBKDF2 output ever equals "-"
+    return None
 
 
 def pin_hash(pin, salt, iters=PIN_ITER):
@@ -393,7 +411,7 @@ def set_brightness(pct):
     if not bl:
         return {"hw": False}  # HDMI panel: the UI dims in software instead
     val = max(1, round(mx * pct / 100))
-    run(["sudo", "-n", "tee", bl + "/brightness"], input=str(val))
+    priv("backlight", val)
     return {"hw": True}
 
 
@@ -500,11 +518,10 @@ def power(action):
     if action == "restart-shell":
         restart_session()
         return {"ok": True}
-    cmd = {"reboot": ["sudo", "-n", "systemctl", "reboot"],
-           "shutdown": ["sudo", "-n", "systemctl", "poweroff"]}.get(action)
-    if not cmd:
+    what = {"reboot": "reboot", "shutdown": "poweroff"}.get(action)
+    if not what:
         return {"ok": False}
-    threading.Timer(0.8, lambda: run(cmd)).start()
+    threading.Timer(0.8, lambda: priv("power", what)).start()
     return {"ok": True}
 
 
@@ -518,7 +535,7 @@ def screen(on):
         hw = True
     bl, _, _ = backlight()
     if bl and os.path.exists(bl + "/bl_power"):
-        run(["sudo", "-n", "tee", bl + "/bl_power"], input="0" if on else "4")   # 4 = FB_BLANK_POWERDOWN
+        priv("bl-power", "0" if on else "4")   # 4 = FB_BLANK_POWERDOWN
         hw = True
     if not on and have("wlopm"):
         run(["wlopm", "--off", "*"])
@@ -540,7 +557,7 @@ def rotate(deg, confirm=True):
     if deg not in (0, 90, 180, 270):
         return {"ok": False}
     prev = current_rotation()
-    code, out, err = run(["sudo", "-n", "/usr/local/bin/skyglass-display", "rotate", str(deg)])
+    code, out, err = priv("rotate", deg)
     if code == 0 and confirm and deg != prev:
         # like a PC monitor: if nobody confirms (touch broken, can't see) it reverts on its own
         os.makedirs(os.path.dirname(ROT_PENDING), exist_ok=True)
@@ -733,7 +750,7 @@ class TouchCalibrator:
         else:
             return {"ok": False, "message": "Taps didn't line up — try once more, tapping the centre of each cross", "error": round(worst(fitted), 3)}
         matrix = " ".join(f"{v:.4f}" for v in chosen)
-        code, out, errtxt = run(["sudo", "-n", "/usr/local/bin/skyglass-display", "touch-matrix", matrix])
+        code, out, errtxt = priv("touch-matrix", matrix)
         if code != 0:
             return {"ok": False, "message": errtxt or out or "could not save"}
         if ON_DEVICE:
@@ -1137,7 +1154,7 @@ def _updates_job(install):
         return p.returncode
 
     try:
-        if step("Checking for updates…", ["sudo", "-n", "apt-get", "update"], 600) != 0:
+        if step("Checking for updates…", ["sudo", "-n", PRIV, "apt", "update"], 600) != 0:
             UPDATES["result"] = "Could not check for updates. Is the phone online?"
             return
         _, out, _ = run(["apt", "list", "--upgradable"], timeout=60)
@@ -1152,8 +1169,7 @@ def _updates_job(install):
         if not pk:
             UPDATES["result"] = "Skyglass is up to date"
             return
-        code = step("Installing updates…", ["sudo", "-n", "apt-get", "-y", "-o", "Dpkg::Options::=--force-confold",
-                                             "-o", "Dpkg::Options::=--force-confdef", "full-upgrade"], 3600)
+        code = step("Installing updates…", ["sudo", "-n", PRIV, "apt", "full-upgrade"], 3600)
         if code == 0:
             UPDATES.update(packages=[], result=f"Installed {len(pk)} update(s)")
             reboot = os.path.exists("/var/run/reboot-required")
@@ -1219,11 +1235,7 @@ def display_conf_get(key):
 
 
 def display_conf_set(key, value):
-    lines = [l for l in (read(DISPLAY_CONF) or "").splitlines() if not l.startswith(key + "=")]
-    if value:
-        lines.append(f"{key}={value}")
-    code, _, err = run(["sudo", "-n", "tee", DISPLAY_CONF], input="\n".join(lines) + "\n")
-    return code == 0
+    return priv("conf-set", key, value or "")[0] == 0
 
 
 def keyboard_state():
@@ -1342,10 +1354,66 @@ def skyglass_update_start(action):
         return {"ok": False, "message": "unknown action"}
     # its own systemd unit: the update restarts the UI and this backend, it must outlive both
     arg = "--rollback" if action == "rollback" else ""
-    code, out, err = run(["sudo", "-n", "systemd-run", "--unit=skyglass-update", "--collect",
-                          "bash", "-c", f"skyglass-update {arg} >{SKYUP_LOG} 2>&1"], timeout=15)
+    code, out, err = priv("skyglass-update", arg, timeout=15)
     SKYUP["t"] = 0
     return {"ok": code == 0, "message": (err or out).strip()[-200:]}
+
+
+# --------------------------------------------------------------------------- root access (sudo)
+# Settings › Developer › Root access: does sudo ask for the user's Linux password? Both
+# directions need the lock-screen PIN; going back to passwordless also needs that password
+# (skyglass-sudo-mode isn't on the no-password list, so sudo checks it).
+
+SUDO_MODE = "/usr/local/sbin/skyglass-sudo-mode"
+
+
+def sudo_state():
+    full = run(["sudo", "-n", "true"], timeout=4)[0] == 0
+    code, out, _ = priv("password-status", timeout=6)
+    return {"mode": "full" if full else "strict", "password": out.strip() == "set",
+            "helper": code == 0, "pin_set": bool(pin_load())}
+
+
+def _pin_ok(pin):
+    if not pin_load():
+        return {"ok": False, "message": "Set a lock-screen PIN first (Settings › Lock screen & PIN)"}
+    r = pin_check(pin if isinstance(pin, str) else "")
+    return {"ok": True} if r.get("ok") else {"ok": False, "message": "Wrong PIN", **r}
+
+
+def _as_root_with_password(args, password, stdin_rest=""):
+    """sudo -S: the user's password comes in on stdin, never in a command line (ps shows those)."""
+    st = sudo_state()
+    if st["mode"] == "full":
+        return run(["sudo", "-n"] + args, input=stdin_rest, timeout=30)
+    if not isinstance(password, str) or not password:
+        return 1, "", "Type your Linux password"
+    code, out, err = run(["sudo", "-k", "-S", "-p", ""] + args, input=password + "\n" + stdin_rest, timeout=30)
+    if code != 0 and ("incorrect password" in err or "try again" in err.lower() or "Sorry" in err):
+        err = "Wrong Linux password"
+    return code, out, err
+
+
+def sudo_set(b):
+    mode = b.get("mode")
+    if mode not in ("full", "strict"):
+        return {"ok": False, "message": "unknown mode"}
+    r = _pin_ok(b.get("pin"))
+    if not r["ok"]:
+        return r
+    code, out, err = _as_root_with_password([SUDO_MODE, mode], b.get("password"))
+    return {"ok": code == 0, "message": (err or out).strip().replace("skyglass-sudo-mode: ", ""), **sudo_state()}
+
+
+def user_password_set(b):
+    new = b.get("new")
+    if not isinstance(new, str) or len(new) < 6 or ":" in new or "\n" in new:
+        return {"ok": False, "message": "Use at least 6 characters (no ':')"}
+    r = _pin_ok(b.get("pin"))
+    if not r["ok"]:
+        return r
+    code, out, err = _as_root_with_password([SUDO_MODE, "set-password"], b.get("current"), new + "\n")
+    return {"ok": code == 0, "message": (err or out).strip().replace("skyglass-sudo-mode: ", ""), **sudo_state()}
 
 
 def android_status():
@@ -1411,8 +1479,9 @@ def android_action(action, b=None):
 def find_icon(name):
     if not name:
         return None
-    if os.path.isabs(name) and os.path.exists(name):
-        return name
+    if os.path.isabs(name):   # a .desktop file's own icon: only real icon files, never any file
+        ok = re.search(r"\.(png|svg|xpm|jpe?g|webp|ico)$", name, re.I) and os.path.isfile(name)
+        return name if ok else None
     for theme in ("hicolor", "Adwaita", "breeze"):
         hits = glob.glob(f"/usr/share/icons/{theme}/*/apps/{glob.escape(name)}.*") + \
             glob.glob(f"{HOME}/.local/share/icons/{theme}/*/apps/{glob.escape(name)}.*")
@@ -1680,28 +1749,12 @@ def usb_mount(dev):
         return {"ok": False, "message": "That drive is gone"}
     if drive["mounted"]:
         return {"ok": True, "mountpoint": drive["mountpoint"]}
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", drive["label"])[:32] or "USB"
-    mp = os.path.join(USB_ROOT, name)
-    if os.path.ismount(mp):
-        mp += "_" + os.path.basename(dev)
-    uid, gid = os.getuid(), os.getgid()
-    fs = drive["fstype"]
-    args = ["sudo", "-n", "mount"]
-    if fs in ("vfat", "exfat", "ntfs", "ntfs3"):
-        args += ["-o", f"uid={uid},gid={gid},umask=022"]
-    if fs == "ntfs":
-        args += ["-t", "ntfs3"]
-    run(["sudo", "-n", "mkdir", "-p", mp])
-    code, _, err = run(args + [dev, mp], timeout=30)
-    if code != 0 and fs in ("ntfs", "ntfs3"):  # older kernels: the ntfs-3g driver instead
-        code, _, err = run(["sudo", "-n", "mount", "-t", "ntfs-3g", "-o", f"uid={uid},gid={gid},umask=022", dev, mp], timeout=30)
+    # skyglass-priv checks it's really a USB drive, mounts it nosuid,nodev and picks the folder
+    code, out, err = priv("usb-mount", dev, timeout=40)
     if code != 0:
-        run(["sudo", "-n", "rmdir", mp])
-        USB_STATE["last_error"] = f"{dev} ({fs}): {err.strip()}"
-        return {"ok": False, "message": "Could not open the drive: " + (err.strip() or fs)}
-    if not os.access(mp, os.W_OK):  # ext4 etc.: let the phone's user write to it
-        run(["sudo", "-n", "chown", f"{uid}:{gid}", mp])
-    return {"ok": True, "mountpoint": mp}
+        USB_STATE["last_error"] = f"{dev} ({drive['fstype']}): {err.strip()}"
+        return {"ok": False, "message": "Could not open the drive: " + (err.strip().replace("skyglass-priv: ", "") or drive["fstype"])}
+    return {"ok": True, "mountpoint": out.strip().splitlines()[-1]}
 
 
 def usb_eject(dev):
@@ -1711,11 +1764,9 @@ def usb_eject(dev):
     if CAMERA.rec and CAMERA.rec[1].startswith(drive["mountpoint"] + "/"):
         CAMERA.record_stop()
     os.sync()
-    code, _, err = run(["sudo", "-n", "umount", drive["mountpoint"]], timeout=60)
+    code, _, err = priv("usb-umount", drive["mountpoint"], timeout=60)
     if code != 0:
-        return {"ok": False, "message": "Drive is busy: " + err.strip()}
-    if drive["mountpoint"].startswith(USB_ROOT + "/"):
-        run(["sudo", "-n", "rmdir", drive["mountpoint"]])
+        return {"ok": False, "message": "Drive is busy: " + err.strip().replace("skyglass-priv: ", "")}
     return {"ok": True, "message": "Safe to remove"}
 
 
@@ -1753,7 +1804,7 @@ def usb_debug():
     if have("lsusb"):
         _, out, _ = run(["lsusb"])
         lines += ["", "USB devices (lsusb):", out.strip()]
-    code, out, _ = run(["sudo", "-n", "dmesg"], timeout=10)
+    code, out, _ = priv("dmesg", timeout=10)
     if code == 0:
         rel = [l for l in out.splitlines() if re.search(r"usb|sd[a-z]|scsi|uas|over-current|exfat|ntfs|fat", l, re.I)]
         lines += ["", "Kernel messages (last USB lines):"] + rel[-15:]
@@ -1796,8 +1847,7 @@ def usb_watch_thread():
                     EVENTS.emit("usb-removed", label=d["label"])
                     mp = d.get("mountpoint")
                     if mp and mp.startswith(USB_ROOT + "/"):  # yanked without eject: clean up
-                        run(["sudo", "-n", "umount", "-l", mp])
-                        run(["sudo", "-n", "rmdir", mp])
+                        priv("usb-umount", mp, "lazy")
             known = now
         except Exception as e:  # noqa: BLE001 — never let the watcher die
             print("usb watch:", e, flush=True)
@@ -2106,8 +2156,8 @@ def clean_caches():
     before = free_bytes("/")
     for d in CACHE_DIRS:
         shutil.rmtree(d, ignore_errors=True)
-    run(["sudo", "-n", "apt-get", "clean"], timeout=60)
-    run(["sudo", "-n", "journalctl", "--vacuum-size=40M"], timeout=60)
+    priv("apt", "clean", timeout=60)
+    priv("journal-vacuum", timeout=60)
     os.sync()
     return {"ok": True, "freed": max(0, free_bytes("/") - before)}
 
@@ -2338,7 +2388,7 @@ def test_storage():
             f.flush()
             os.fsync(f.fileno())
         w = size / (time.time() - t0) / 1e6
-        run(["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"], timeout=10)  # read from the card, not RAM
+        priv("drop-caches", timeout=10)  # read from the card, not RAM
         t0 = time.time()
         with open(path, "rb") as f:
             while f.read(4 * 1024 * 1024):
@@ -2436,7 +2486,7 @@ def test_led(on):
     if not os.path.isdir(LED):
         return {"ok": None, "rows": [["LED", "no activity LED"]]}
     # on: blink the green ACT LED; off: back to normal (flashes on SD card activity)
-    run(["sudo", "-n", "tee", LED + "/trigger"], input="timer" if on else "mmc0")
+    priv("act-led", "timer" if on else "mmc0")
     return {"ok": True, "rows": []}
 
 
@@ -2622,7 +2672,13 @@ class Handler(BaseHTTPRequestHandler):
     def guard(self):
         # Only the local shell may talk to us (blocks DNS-rebinding style tricks).
         host = (self.headers.get("Host") or "").split(":")[0]
-        return host in ("127.0.0.1", "localhost")
+        if host not in ("127.0.0.1", "localhost"):
+            return False
+        # Fetch metadata: Chromium marks every request with where it came from. A website open in
+        # the browser may not use us at all, not even with GET through <img>/<script>/<audio>
+        # (camera stream, files, settings.js). Our own UI is "same-origin"; typing the address
+        # yourself is "none"; tools like curl send nothing.
+        return self.headers.get("Sec-Fetch-Site") not in ("cross-site", "same-site")
 
     def same_origin(self):
         # A website open in the phone's browser could otherwise POST to 127.0.0.1:7777
@@ -2631,7 +2687,9 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is None:
             return True
-        return origin == "http://" + (self.headers.get("Host") or "") or origin.startswith("chrome-extension://")
+        if origin.startswith("chrome-extension://"):   # the browser bar may only close the browser
+            return urlparse(self.path).path == "/api/browser/close"
+        return origin == "http://" + (self.headers.get("Host") or "")
 
     # ---------------------------------------------------------------- GET
     def do_GET(self):
@@ -2727,6 +2785,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "left": max(0, round(pend["deadline"] - time.time())) if pend else 0})
         if p == "/api/skyglass-update":
             return self.send_json(skyglass_update_state(force=q.get("force") == "1"))
+        if p == "/api/sudo":
+            return self.send_json(sudo_state())
         if p == "/api/led":
             return self.send_json(led({"cmd": "status"}))
         if p == "/api/notifications":
@@ -2877,6 +2937,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": False})
         if p == "/api/skyglass-update":
             return self.send_json(skyglass_update_start(str(b.get("action", "update"))))
+        if p == "/api/sudo":  # {"mode": "full"|"strict", "pin", "password"}
+            return self.send_json(sudo_set(b))
+        if p == "/api/user-password":  # {"new", "pin", "current"}
+            return self.send_json(user_password_set(b))
         if p == "/api/led":
             return self.send_json(led_api(b))
         if p == "/api/notify":  # also over ssh / scripts: curl -X POST -d '{"title":"Hi","body":"..."}' 127.0.0.1:7777/api/notify
@@ -2920,24 +2984,22 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/camera/record/stop":
             return self.send_json(CAMERA.record_stop())
         if p == "/api/bluetooth":
-            code, out, err = run(["sudo", "-n", "rfkill", "unblock" if b.get("on") else "block", "bluetooth"])
+            code, out, err = priv("bluetooth", "on" if b.get("on") else "off")
             return self.send_json({"ok": code == 0, "message": err.strip()})
         if p == "/api/time":
             if "timezone" in b:
                 tz = str(b["timezone"])
                 if tz not in list_zones()["zones"]:
                     return self.send_json({"ok": False, "message": "unknown time zone"})
-                code, out, err = run(["sudo", "-n", "timedatectl", "set-timezone", tz])
+                code, out, err = priv("timezone", tz)
             else:
-                code, out, err = run(["sudo", "-n", "timedatectl", "set-ntp", "true" if b.get("ntp") else "false"])
+                code, out, err = priv("ntp", "on" if b.get("ntp") else "off")
             return self.send_json({"ok": code == 0, "message": err.strip()})
         if p == "/api/hostname":
             name = str(b.get("name", "")).strip().lower()
             if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?", name):
                 return self.send_json({"ok": False, "message": "Use letters, numbers and - only"})
-            code, out, err = run(["sudo", "-n", "hostnamectl", "set-hostname", name])
-            if code == 0:
-                run(["sudo", "-n", "sed", "-i", rf"s/^127\.0\.1\.1.*/127.0.1.1\t{name}/", "/etc/hosts"])
+            code, out, err = priv("hostname", name)
             return self.send_json({"ok": code == 0, "message": err.strip()})
         if p == "/api/storage/clean":
             return self.send_json(clean_caches())

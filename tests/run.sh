@@ -35,7 +35,17 @@ outside = src
 for b in blocks: outside = outside.replace(b, "")
 sys.exit(0 if blocks and "passwd -d" in blocks[0] and not re.search(r"passwd -d|chpasswd|usermod -p", outside) else 1)
 PYEOF
-command -v visudo >/dev/null && { visudo -cf rootfs/etc/sudoers.d/010-skyglass >/dev/null && ok "sudoers" || bad "sudoers file invalid (would break sudo!)"; }
+if command -v visudo >/dev/null; then   # both sudo modes must be valid sudoers files (a broken one locks sudo)
+  for m in full strict; do
+    T=$(mktemp)
+    (U=skyglass; eval "$(sed -n '/^template() {/,/^}/p' rootfs/usr/local/sbin/skyglass-sudo-mode)"; template $m) >"$T"
+    visudo -cf "$T" >/dev/null && grep -q '^skyglass ALL' "$T" && ok "sudoers ($m mode) is valid" || bad "sudoers $m mode invalid (would break sudo!)"; rm -f "$T"
+  done
+fi
+grep -q 'NOPASSWD: /usr/local/sbin/skyglass-priv" ;;' rootfs/usr/local/sbin/skyglass-sudo-mode && ! grep -q 'NOPASSWD:.*skyglass-sudo-mode' rootfs/usr/local/sbin/skyglass-sudo-mode \
+  && ok "strict mode: only skyglass-priv runs without a password (not the mode switch)" || bad "strict mode lets more than skyglass-priv run without a password"
+! grep -rn '"sudo", "-n", "\(tee\|sh\|mount\|umount\|systemctl\|apt-get\|rfkill\|timedatectl\|hostnamectl\|sed\|mkdir\|rmdir\|chown\|dmesg\|journalctl\)"' rootfs/usr/lib/skyglass/shell/server.py \
+  && ok "the backend only uses root through skyglass-priv" || bad "the backend runs a raw command as root (use skyglass-priv)"
 find rootfs -name __pycache__ -exec rm -rf {} + 2>/dev/null
 
 echo "Self-repair"
@@ -59,6 +69,28 @@ python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert not d['uncle
 echo "# edited" >>"$R/boot/config.txt"; env $RENV bash rootfs/usr/local/sbin/skyglass-repair >/dev/null 2>&1
 grep -q edited "$R/state/boot-backup/config.txt" && ok "your own config.txt edits become the new backup" || bad "boot backup update"
 rm -rf "$R"
+
+echo "Root helper (skyglass-priv refuses anything outside its list)"
+priv_refuses() {   # runs the helper as if root, but only with arguments it must reject before doing anything
+  python3 - "$@" <<'PYEOF' >/dev/null 2>&1
+import importlib.machinery, os, sys
+os.geteuid = lambda: 0
+os.environ["SUDO_USER"] = os.environ.get("USER", "nobody")
+m = importlib.machinery.SourceFileLoader("priv", "rootfs/usr/local/sbin/skyglass-priv").load_module()
+try:
+    m.main(sys.argv[1:])
+except SystemExit as e:
+    sys.exit(0 if e.code == 2 else 1)
+sys.exit(1)
+PYEOF
+}
+for bad_args in "rm -rf /" "power now" "rotate 45" "touch-matrix 1;reboot" "apt install evil" "conf-set PATH /tmp" "conf-set COMPOSITOR \$(reboot)" \
+                "usb-mount /dev/mmcblk0p2" "usb-mount /dev/../etc/shadow" "usb-umount /" "usb-umount /media/skyglass-usb/../../etc" \
+                "timezone ../../etc/passwd" "hostname a;reboot" "act-led evil" "bluetooth maybe" "skyglass-update --evil" "waydroid-container restart"; do
+  # shellcheck disable=SC2086
+  priv_refuses $bad_args && ok "refuses: skyglass-priv $bad_args" || bad "skyglass-priv accepted: $bad_args"
+done
+rm -rf rootfs/usr/local/sbin/__pycache__
 
 echo "Backend API"
 TMPH=$(mktemp -d)
@@ -85,6 +117,12 @@ for ep in /api/status /api/about /api/pin /api/apps /api/files /api/photos /api/
 done
 get / | grep -q '<title>Skyglass' && ok "UI page served" || bad "UI page"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.com' "127.0.0.1:$PORT/api/status")" = 403 ] && ok "foreign Host header blocked" || bad "Host check"
+for ep in "/api/settings.js" "/api/camera/stream" "/api/file?path=/etc/hostname" "/api/status"; do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: cross-site' "127.0.0.1:$PORT$ep")" = 403 ] || { bad "a website can GET $ep"; continue; }
+  ok "websites can't GET $ep (img/script tricks)"
+done
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: same-origin' "127.0.0.1:$PORT/api/status")" = 200 ] && ok "the phone's own UI still gets through" || bad "same-origin requests blocked"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: chrome-extension://abc' -d '{}' "127.0.0.1:$PORT/api/term/start")" = 403 ] && ok "the browser extension may only close the browser" || bad "extension origin can start a terminal"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "127.0.0.1:$PORT/../../etc/passwd")" = 404 ] && ok "path traversal blocked" || bad "path traversal"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://evil.example' -d '{}' "127.0.0.1:$PORT/api/power")" = 403 ] && ok "websites can't send commands to the phone" || bad "cross-site POST allowed"
 post /api/pin/set '{"new":"12"}' | grep -q '"ok": false' && ok "too-short PIN refused" || bad "short PIN accepted"
@@ -92,6 +130,9 @@ post /api/pin/set '{"new":"2468"}' | grep -q '"ok": true' && ok "PIN set" || bad
 post /api/pin/verify '{"pin":"0000"}' | grep -q '"ok": false' && ok "wrong PIN rejected" || bad "wrong PIN accepted!"
 post /api/pin/verify '{"pin":"2468"}' | grep -q '"ok": true' && ok "right PIN accepted" || bad "right PIN rejected"
 post /api/pin/set '{"old":"9999","new":"1357"}' | grep -q '"ok": false' && ok "PIN change needs the old PIN" || bad "PIN changed without old PIN!"
+cp "$TMPH/.config/skyglass/pin.json" "$TMPH/pin.bak"; printf '{"salt": "x", "ha' >"$TMPH/.config/skyglass/pin.json"
+get /api/pin | grep -q '"set": true' && post /api/pin/verify '{"pin":"2468"}' | grep -q '"ok": false' && ok "a damaged PIN file keeps the phone locked" || bad "a damaged PIN file unlocks the phone!"
+mv "$TMPH/pin.bak" "$TMPH/.config/skyglass/pin.json"
 post /api/pin/verify '{"pin":["not","a","string"]}' | python3 -c 'import sys,json; json.load(sys.stdin)' && ok "garbage input handled" || bad "garbage input crashed a request"
 curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{not json' "127.0.0.1:$PORT/api/pin/verify" | grep -q '"ok"' && ok "malformed JSON handled" || bad "malformed JSON"
 WP="$ROOT/rootfs/usr/share/skyglass/wallpapers/aero-lagoon.jpg"

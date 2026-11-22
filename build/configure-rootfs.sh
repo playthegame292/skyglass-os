@@ -9,7 +9,6 @@ HOST_NAME=${SKYGLASS_HOSTNAME:-skyglass}
 
 echo ">> copying Skyglass files"
 cp -a --no-preserve=ownership "$OVERLAY"/. /   # files must be root-owned (sudo refuses otherwise)
-chmod 0440 /etc/sudoers.d/010-skyglass
 chmod +x /usr/local/bin/* /usr/local/sbin/* /usr/lib/skyglass/shell/server.py
 
 # The password is only cleared when the user is created (the very first install). Updates and
@@ -27,12 +26,13 @@ done
 cp -n /etc/skel/.bash_profile "/home/$USER_NAME/.bash_profile" 2>/dev/null || true
 grep -q skyglass-session "/home/$USER_NAME/.bash_profile" || cat /etc/skel/.bash_profile >>"/home/$USER_NAME/.bash_profile"
 if [ "$USER_NAME" != skyglass ]; then
-  sed -i "s/^skyglass /$USER_NAME /" /etc/sudoers.d/010-skyglass
   sed -i "s/--autologin skyglass/--autologin $USER_NAME/" /etc/systemd/system/getty@tty1.service.d/autologin.conf
 fi
 mkdir -p "/home/$USER_NAME/Pictures/Skyglass"
 chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME"
-visudo -cf /etc/sudoers.d/010-skyglass >/dev/null
+# sudo: passwordless on the first install. After that it's your choice (Settings › Developer ›
+# Root access, or skyglass-sudo-mode), and updates never change it.
+SKYGLASS_USER="$USER_NAME" /usr/local/sbin/skyglass-sudo-mode init
 
 echo ">> identity"
 echo "$HOST_NAME" >/etc/hostname

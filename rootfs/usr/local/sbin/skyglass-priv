@@ -1,0 +1,230 @@
+#!/usr/bin/python3
+"""skyglass-priv: the only things Skyglass itself needs root for, each with checked arguments.
+
+When sudo asks for your password (Settings › Developer › Root access), this is the one command
+the phone's user may still run as root without it (sudoers: NOPASSWD for this file only). So it
+accepts a fixed list of actions and refuses anything else: no paths, no shell, no free-form
+commands. Brightness, rotation, power, USB drives, Bluetooth, time, updates and so on keep
+working, while an app (or a website that broke out of the browser) can't get a root shell.
+
+  sudo skyglass-priv <action> [args]      (skyglass-priv help lists the actions)
+"""
+import glob
+import json
+import os
+import pwd
+import re
+import subprocess
+import sys
+
+USB_ROOT = "/media/skyglass-usb"
+DISPLAY_CONF = "/etc/skyglass/display.conf"
+DISPLAY = "/usr/local/bin/skyglass-display"
+
+
+def die(msg, code=2):
+    print(f"skyglass-priv: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, **kw).returncode
+
+
+def write(path, value):
+    with open(path, "w") as f:
+        f.write(value)
+
+
+def user():
+    """The phone's user who called us through sudo (never root itself)."""
+    name = os.environ.get("SUDO_USER") or ""
+    try:
+        pw = pwd.getpwnam(name)
+    except KeyError:
+        die("run this through sudo as the phone's user")
+    return pw
+
+
+def backlight():
+    for bl in sorted(glob.glob("/sys/class/backlight/*")):
+        return bl
+    die("no backlight on this panel", 1)
+
+
+def int_arg(v, lo, hi):
+    if not re.fullmatch(r"\d{1,6}", v or "") or not lo <= int(v) <= hi:
+        die(f"expected a number from {lo} to {hi}")
+    return int(v)
+
+
+def one_of(v, *choices):
+    if v not in choices:
+        die("expected one of: " + ", ".join(choices))
+    return v
+
+
+def usb_drive(dev):
+    """dev must be a partition (or whole disk) on a removable / USB disk, never the SD card."""
+    if not re.fullmatch(r"/dev/(sd[a-z]+[0-9]*|mmcblk[1-9][0-9]*(p[0-9]+)?)", dev or ""):
+        die("not a USB drive")
+    out = subprocess.run(["lsblk", "-J", "-p", "-o", "NAME,TYPE,FSTYPE,LABEL,MOUNTPOINT,TRAN,RM,PKNAME", dev],
+                         capture_output=True, text=True).stdout
+    try:
+        info = json.loads(out)["blockdevices"][0]
+    except (ValueError, KeyError, IndexError):
+        die("unknown drive")
+    parent = info.get("pkname") or info["name"]
+    pinfo = json.loads(subprocess.run(["lsblk", "-J", "-d", "-p", "-o", "NAME,TRAN,RM", parent],
+                                      capture_output=True, text=True).stdout or '{"blockdevices":[{}]}')["blockdevices"][0]
+    root_src = subprocess.run(["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True).stdout.strip()
+    if root_src.startswith(parent):
+        die("that's the phone's own storage")
+    if pinfo.get("tran") != "usb" and str(pinfo.get("rm")) not in ("1", "True", "true"):
+        die("not a removable drive")
+    return info
+
+
+def act_led():
+    for name in ("ACT", "led0"):
+        p = f"/sys/class/leds/{name}/trigger"
+        if os.path.exists(p):
+            return p
+    die("no activity LED", 1)
+
+
+def conf_set(key, value):
+    allowed = {"COMPOSITOR": r"(|labwc|cage)", "KEYBOARD_LAYOUT": r"(|[a-z]{2,6})"}
+    if key not in allowed or not re.fullmatch(allowed[key], value):
+        die("not a setting this helper may change")
+    try:
+        lines = open(DISPLAY_CONF).read().splitlines()
+    except OSError:
+        lines = []
+    lines = [l for l in lines if not l.startswith(key + "=")] + ([f"{key}={value}"] if value else [])
+    tmp = DISPLAY_CONF + ".tmp"
+    write(tmp, "\n".join(lines) + "\n")
+    os.replace(tmp, DISPLAY_CONF)
+
+
+def main(a):
+    if not a or a[0] in ("help", "-h", "--help"):
+        print(__doc__.strip())
+        print("\nactions: ping, backlight N, bl-power 0|4, power reboot|poweroff, rotate 0|90|180|270, "
+              "touch-matrix 'a b c d e f', apt update|full-upgrade|clean, conf-set KEY VALUE, ssh-enable, "
+              "usb-mount DEV, usb-umount MOUNTPOINT [lazy], dmesg, journal-vacuum, drop-caches, "
+              "act-led timer|mmc0, bluetooth on|off, timezone ZONE, ntp on|off, hostname NAME, "
+              "skyglass-update [--rollback], waydroid-container start|stop, repair-check, password-status")
+        return 0
+    if os.geteuid() != 0:
+        die("needs root: sudo skyglass-priv " + " ".join(a))
+    act, args = a[0], a[1:]
+    arg = lambda i: args[i] if len(args) > i else ""
+
+    if act == "ping":
+        print("ok")
+    elif act == "backlight":
+        bl = backlight()
+        mx = int(open(bl + "/max_brightness").read().strip() or 255)
+        write(bl + "/brightness", str(int_arg(arg(0), 0, mx)))
+    elif act == "bl-power":
+        v = one_of(arg(0), "0", "4")
+        write(backlight() + "/bl_power", v)
+    elif act == "power":
+        return run(["systemctl", {"reboot": "reboot", "poweroff": "poweroff"}[one_of(arg(0), "reboot", "poweroff")]])
+    elif act == "rotate":
+        return run([DISPLAY, "rotate", one_of(arg(0), "0", "90", "180", "270")])
+    elif act == "touch-matrix":
+        if not re.fullmatch(r"-?\d{1,3}(\.\d{1,6})?( -?\d{1,3}(\.\d{1,6})?){5}", arg(0)):
+            die("expected six numbers")
+        return run([DISPLAY, "touch-matrix", arg(0)])
+    elif act == "apt":
+        env = dict(os.environ, DEBIAN_FRONTEND="noninteractive", LC_ALL="C")
+        cmd = {"update": ["apt-get", "update"], "clean": ["apt-get", "clean"],
+               "full-upgrade": ["apt-get", "-y", "-o", "Dpkg::Options::=--force-confold",
+                                "-o", "Dpkg::Options::=--force-confdef", "full-upgrade"]}[one_of(arg(0), "update", "full-upgrade", "clean")]
+        return run(cmd, env=env)
+    elif act == "conf-set":
+        conf_set(arg(0), arg(1))
+    elif act == "ssh-enable":
+        return run(["systemctl", "enable", "--now", "ssh"])
+    elif act == "usb-mount":
+        u = user()
+        info = usb_drive(arg(0))
+        if info.get("mountpoint"):
+            print(info["mountpoint"]); return 0
+        fs = info.get("fstype") or ""
+        if not fs or fs in ("swap", "crypto_LUKS"):
+            die(f"can't open a '{fs or 'unknown'}' drive", 1)
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", info.get("label") or "")[:32].strip("._") or "USB"
+        mp = os.path.join(USB_ROOT, name)
+        if os.path.ismount(mp):
+            mp += "_" + os.path.basename(info["name"])
+        os.makedirs(mp, exist_ok=True)
+        # nosuid,nodev: a drive must never be able to bring its own root programs or device files
+        opts = "nosuid,nodev"
+        if fs in ("vfat", "exfat", "ntfs", "ntfs3"):
+            opts += f",uid={u.pw_uid},gid={u.pw_gid},umask=022"
+        types = (["-t", "ntfs3"] if fs == "ntfs" else [])
+        code = run(["mount", "-o", opts] + types + [info["name"], mp])
+        if code != 0 and fs in ("ntfs", "ntfs3"):
+            code = run(["mount", "-t", "ntfs-3g", "-o", opts, info["name"], mp])
+        if code != 0:
+            os.rmdir(mp); return code
+        if fs not in ("vfat", "exfat", "ntfs", "ntfs3") and not os.stat(mp).st_uid == u.pw_uid:
+            os.chown(mp, u.pw_uid, u.pw_gid)   # ext4 etc.: the drive's top folder for the phone's user
+        print(mp)
+    elif act == "usb-umount":
+        mp = os.path.realpath(arg(0))
+        if not mp.startswith(USB_ROOT + "/") or "/" in mp[len(USB_ROOT) + 1:]:
+            die("only drives Skyglass opened")
+        code = run(["umount"] + (["-l"] if arg(1) == "lazy" else []) + [mp])
+        try:
+            os.rmdir(mp)
+        except OSError:
+            pass
+        return code
+    elif act == "dmesg":
+        return run(["dmesg"])
+    elif act == "journal-vacuum":
+        return run(["journalctl", "--vacuum-size=40M"])
+    elif act == "drop-caches":
+        write("/proc/sys/vm/drop_caches", "3")
+    elif act == "act-led":
+        v = one_of(arg(0), "timer", "mmc0", "none", "default-on")   # check the value before anything else
+        write(act_led(), v)
+    elif act == "bluetooth":
+        return run(["rfkill", {"on": "unblock", "off": "block"}[one_of(arg(0), "on", "off")], "bluetooth"])
+    elif act == "timezone":
+        tz = arg(0)
+        if not re.fullmatch(r"[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}", tz) or not os.path.isfile("/usr/share/zoneinfo/" + tz):
+            die("unknown time zone")
+        return run(["timedatectl", "set-timezone", tz])
+    elif act == "ntp":
+        return run(["timedatectl", "set-ntp", {"on": "true", "off": "false"}[one_of(arg(0), "on", "off")]])
+    elif act == "hostname":
+        name = arg(0)
+        if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?", name):
+            die("use letters, numbers and - only")
+        code = run(["hostnamectl", "set-hostname", name])
+        if code == 0:
+            run(["sed", "-i", rf"s/^127\.0\.1\.1.*/127.0.1.1\t{name}/", "/etc/hosts"])
+        return code
+    elif act == "skyglass-update":
+        flag = one_of(arg(0), "", "--rollback")
+        return run(["systemd-run", "--unit=skyglass-update", "--collect", "bash", "-c",
+                    f"skyglass-update {flag} >/var/log/skyglass-update.log 2>&1"])
+    elif act == "waydroid-container":
+        return run(["systemctl", one_of(arg(0), "start", "stop"), "waydroid-container.service"])
+    elif act == "repair-check":
+        return run(["/usr/local/sbin/skyglass-repair", "--check"])
+    elif act == "password-status":
+        st = subprocess.run(["passwd", "-S", user().pw_name], capture_output=True, text=True).stdout.split()
+        print("set" if len(st) > 1 and st[1] == "P" else "none")
+    else:
+        die(f"unknown action '{act}' (skyglass-priv help)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]) or 0)

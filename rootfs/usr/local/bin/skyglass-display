@@ -20,7 +20,7 @@ RULE=/etc/udev/rules.d/99-skyglass-touch.rules
 BOOT=/boot/firmware
 [ -d "$BOOT" ] || BOOT=/boot
 
-need_root() { [ "$(id -u)" = 0 ] || exec sudo -n "$0" "$@"; }
+need_root() { [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"; }   # may ask for your password
 conf_get() { [ -f "$CONF" ] && . "$CONF"; eval "echo \${$1:-$2}"; }
 conf_set() {
   mkdir -p "$(dirname "$CONF")"; touch "$CONF"

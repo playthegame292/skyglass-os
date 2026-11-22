@@ -11,7 +11,7 @@
 # known-good copy that skyglass-repair restores damaged files from. The previous version is
 # kept for --rollback. Debian's own packages update separately (Settings › Software updates).
 set -uo pipefail
-[ "$(id -u)" = 0 ] || exec sudo -n "$0" "$@"
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"   # may ask for your password (Settings: Software updates never does)
 CONF=/etc/skyglass/update.conf
 STATE=/var/lib/skyglass
 WORK=$STATE/update

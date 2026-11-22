@@ -2895,10 +2895,50 @@ function powerPage(body) {
     listItem({ icon: 'rotate', title: 'Reboot', onclick: act('reboot') }),
     listItem({ icon: 'power', title: 'Shut down', onclick: act('shutdown') })));
 }
+// ---- Root access: does sudo ask for the Linux password? (needs the PIN either way)
+async function rootPage(body, win) {
+  const st = await api('/api/sudo');
+  const strict = st.mode === 'strict';
+  const field = (ph, type = 'password') => h('input', { class: 'field', type, placeholder: ph, autocomplete: 'off' });
+  const pinField = () => h('input', { class: 'field', type: 'password', inputmode: 'numeric', placeholder: 'Lock-screen PIN', maxlength: 8 });
+  const refresh = () => { win.back(); win.push('Root access', rootPage); };
+  const ask = async (title, fields, okLabel) => {
+    const box = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, ...fields);
+    setTimeout(() => fields[0] && fields[0].focus(), 250);
+    return (await modal(title, box, [{ label: 'Cancel' }, { label: okLabel, value: 'y', primary: true }])) === 'y';
+  };
+  const setPassword = async () => {
+    const cur = field('Current Linux password'), nw = field('New password (6+ characters)'), nw2 = field('New password again'), pin = pinField();
+    const fields = (strict && st.password ? [cur] : []).concat([nw, nw2, pin]);
+    if (!await ask(st.password ? 'Change the Linux password' : 'Set a Linux password', fields, 'Save')) return;
+    if (nw.value !== nw2.value) return toast('The two passwords are different', 3500);
+    const r = await api('/api/user-password', { new: nw.value, current: cur.value, pin: pin.value });
+    toast(r.ok ? 'Password saved ✔' : r.locked_for ? 'Too many wrong PINs. Try again later' : r.message || 'Failed', 4000);
+    if (r.ok) refresh();
+  };
+  const toggle = async on => {   // on = ask for the password
+    if (on && !st.password) { toast('Set a Linux password first', 3500); return refresh(); }
+    const pw = field('Your Linux password'), pin = pinField();
+    const ok = await ask(on ? 'Ask for the password?' : 'Stop asking for the password?',
+      on ? [h('p', {}, 'sudo in the Terminal and in Linux apps will ask for your Linux password. The phone itself (brightness, USB drives, updates…) keeps working without it.'), pin]
+         : [h('p', {}, 'Anything running as you, including apps, can then use root without asking.'), pw, pin], on ? 'Ask' : 'Stop asking');
+    if (!ok) return refresh();
+    const r = await api('/api/sudo', { mode: on ? 'strict' : 'full', pin: pin.value, password: pw.value });
+    toast(r.ok ? (on ? 'sudo now asks for your password ✔' : 'sudo no longer asks') : r.locked_for ? 'Too many wrong PINs. Try again later' : r.message || 'Failed', 4000);
+    refresh();
+  };
+  if (!st.pin_set) body.append(h('p', { class: 'hint' }, 'Set a lock-screen PIN first: changing root access needs it.'));
+  body.append(h('div', { class: 'list' },
+      listItem({ icon: 'lock', title: 'Ask for my password', sub: strict ? 'On: sudo asks for your Linux password' : 'Off: sudo never asks (anything running as you can use root)',
+        right: switchEl(strict, toggle) }),
+      listItem({ icon: 'code', title: st.password ? 'Change the Linux password' : 'Set a Linux password', sub: st.password ? 'Used by sudo, the keyboard login (Ctrl+Alt+F2) and SSH' : 'No password yet: the keyboard login (Ctrl+Alt+F2) lets anyone in', onclick: setPassword })),
+    h('p', { class: 'hint' }, 'Either way, the phone\'s own functions keep working: they use skyglass-priv, a short list of checked actions. Updates never change this setting.'),
+    st.helper ? null : h('p', { class: 'hint' }, '⚠ skyglass-priv isn\'t available: brightness, USB drives and updates may not work. Run skyglass-doctor.'));
+}
 async function devPage(body, win) {
   const a = await api('/api/about');
   body.append(h('div', { class: 'list' },
-    listItem({ icon: 'code', title: 'Root access', sub: a.sudo ? 'Passwordless sudo is active. You own this phone.' : 'sudo needs a password (dev host?)' }),
+    listItem({ icon: 'lock', title: 'Root access', sub: a.sudo ? 'sudo never asks for a password' : 'sudo asks for your password', onclick: () => win.push('Root access', rootPage) }),
     listItem({ icon: 'terminal', title: 'Open Terminal', onclick: () => openApp('terminal') }),
     listItem({ icon: 'display', title: 'Display config', sub: (a.display || 'not set').replace(/\n/g, ' · ') }),
     listItem({ icon: 'close', title: 'Reset Skyglass settings', sub: 'Theme, toggles and unlocked secrets', onclick: async () => {
