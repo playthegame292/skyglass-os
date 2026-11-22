@@ -12,10 +12,14 @@ cp -a --no-preserve=ownership "$OVERLAY"/. /   # files must be root-owned (sudo 
 chmod 0440 /etc/sudoers.d/010-skyglass
 chmod +x /usr/local/bin/* /usr/local/sbin/* /usr/lib/skyglass/shell/server.py
 
-echo ">> user '$USER_NAME' (no password, passwordless sudo)"
+# The password is only cleared when the user is created (the very first install). Updates and
+# reinstalls never touch it, so a password you set (e.g. for SSH) is kept.
 if ! id "$USER_NAME" >/dev/null 2>&1; then
+  echo ">> user '$USER_NAME': new (no password, passwordless sudo)"
   useradd -m -s /bin/bash -c "Skyglass" "$USER_NAME"
-  passwd -d "$USER_NAME" >/dev/null   # only for a new user: an update keeps a password you set
+  passwd -d "$USER_NAME" >/dev/null
+else
+  echo ">> user '$USER_NAME': kept as it is (your password stays)"
 fi
 for g in sudo video render input audio netdev plugdev dialout gpio i2c spi bluetooth; do
   getent group "$g" >/dev/null && usermod -aG "$g" "$USER_NAME"

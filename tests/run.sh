@@ -26,6 +26,15 @@ grep -q 'screen-keyboard-enabled=true' rootfs/usr/share/glib-2.0/schemas/90_skyg
 # file with that whole name and silently boot the default kernel (Android setup then looped forever)
 ! grep -nE '^[A-Za-z0-9_]+=[^#]*[[:space:]]#' boot/config.txt && ! grep -nE "printf .*\\n[A-Za-z0-9_]+=[^\\]*[[:space:]]#" install-on-pi.sh rootfs/usr/local/bin/skyglass-android \
   && ok "boot config lines have no trailing comments" || bad "trailing comment in a config.txt line (the Pi firmware breaks on it)"
+# updates must never clear the password: passwd -d only for a brand-new user
+python3 - <<'PYEOF' && ok "updates keep the password (cleared only on first install)" || bad "an update could clear the user's password"
+import re, sys
+src = open("build/configure-rootfs.sh").read()
+blocks = re.findall(r'if ! id "\$USER_NAME".*?\nfi', src, re.S)
+outside = src
+for b in blocks: outside = outside.replace(b, "")
+sys.exit(0 if blocks and "passwd -d" in blocks[0] and not re.search(r"passwd -d|chpasswd|usermod -p", outside) else 1)
+PYEOF
 command -v visudo >/dev/null && { visudo -cf rootfs/etc/sudoers.d/010-skyglass >/dev/null && ok "sudoers" || bad "sudoers file invalid (would break sudo!)"; }
 find rootfs -name __pycache__ -exec rm -rf {} + 2>/dev/null
 
