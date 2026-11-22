@@ -601,7 +601,13 @@ def main():
     INFO["pins"] = conf["LEDS"]
     engine = Engine(out, groups)
     engine.start()
-    if STATE.prefs.get("boot"):
+    # the blue boot light only when the phone really just booted, not when this service restarts
+    # (an update restarts it while the screen is already running, and nobody would clear it)
+    try:
+        uptime = float(os.environ.get("SKYGLASS_LED_UPTIME") or open("/proc/uptime").read().split()[0])
+    except (OSError, ValueError):
+        uptime = 0
+    if STATE.prefs.get("boot") and uptime < 120:
         STATE.set_layer("boot", "boot", ttl=180)   # the Skyglass backend clears it once the UI is up
     if conf["BACKEND"] != "sim":
         threading.Thread(target=monitor, daemon=True).start()

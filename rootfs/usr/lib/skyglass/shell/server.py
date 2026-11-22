@@ -1147,7 +1147,7 @@ def _updates_job(install):
             UPDATES["result"] = f"{len(pk)} update(s) available" if pk else "Skyglass is up to date"
             if pk:
                 notify("Updates", f"{len(pk)} update(s) available", "Settings › Software updates",
-                       icon="download", open_app="settings", key="updates")
+                       icon="download", open_app="settings", key="updates", urgency="low")
             return
         if not pk:
             UPDATES["result"] = "Skyglass is up to date"
@@ -1158,7 +1158,7 @@ def _updates_job(install):
             UPDATES.update(packages=[], result=f"Installed {len(pk)} update(s)")
             reboot = os.path.exists("/var/run/reboot-required")
             notify("Updates", f"Installed {len(pk)} update(s)", "Restart the phone to finish." if reboot else "",
-                   icon="download", key="updates")
+                   icon="download", key="updates", urgency="low")
         else:
             UPDATES["result"] = "Installing failed. See the log below, or run  sudo apt full-upgrade  in the Terminal."
     finally:

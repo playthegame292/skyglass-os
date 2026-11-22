@@ -217,6 +217,7 @@ const LIGHT = (() => {
       return led({ cmd: 'set', layer: 'flashlight', effect: 'sos', color: S.torchColor }); },
     notify(n) {
       if (S.dnd && n.urgency !== 'critical') return;
+      if (n.urgency === 'low') return;   // quiet info ("update installed"): list only, no light
       notifyOn = true;
       led({ cmd: 'set', layer: 'notify', effect: 'flash', color: NOTIFY_COLORS[n.app] || 'aqua' });
     },

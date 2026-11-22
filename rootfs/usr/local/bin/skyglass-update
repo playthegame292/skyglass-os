@@ -78,6 +78,6 @@ mv "$TREE" $WORK/tree
 install_tree $WORK/tree
 rm -rf $WORK
 say "Skyglass $LATEST installed. The screen restarts to load it."
-skyglass-notify -a Updates "Skyglass $LATEST installed" "Updated from GitHub." >/dev/null 2>&1
+skyglass-notify -a Updates -u low "Skyglass $LATEST installed" "Updated from GitHub." >/dev/null 2>&1
 restart_ui
 exit 0

@@ -65,7 +65,14 @@ TMPH=$(mktemp -d)
 # the RGB LED service, simulated (no GPIO): the backend talks to it like on the phone
 printf 'LEDS="17,27,22 5,6,13"\nBACKEND=sim\n' >"$TMPH/led.conf"
 export SKYGLASS_LED_SOCK=$TMPH/led.sock
-SKYGLASS_LED_CONF=$TMPH/led.conf SKYGLASS_LED_PREFS=$TMPH/led-prefs.json python3 rootfs/usr/local/sbin/skyglass-ledd 2>"$TMPH/led.log" &
+# a service restart long after boot (an update) must not bring back the blue boot light
+printf 'LEDS="17,27,22"\nBACKEND=sim\n' >"$TMPH/led2.conf"
+SKYGLASS_LED_CONF=$TMPH/led2.conf SKYGLASS_LED_SOCK=$TMPH/led2.sock SKYGLASS_LED_PREFS=$TMPH/led2.json SKYGLASS_LED_UPTIME=3600 \
+  python3 rootfs/usr/local/sbin/skyglass-ledd 2>/dev/null & LEDD2=$!
+for _ in $(seq 30); do [ -S "$TMPH/led2.sock" ] && break; sleep 0.1; done
+SKYGLASS_LED_SOCK=$TMPH/led2.sock python3 rootfs/usr/local/bin/skyglass-led status | grep -q '"active": null' && ok "LED: no boot light when the service restarts later (updates)" || bad "LED boot light after a service restart"
+kill $LEDD2 2>/dev/null
+SKYGLASS_LED_CONF=$TMPH/led.conf SKYGLASS_LED_PREFS=$TMPH/led-prefs.json SKYGLASS_LED_UPTIME=10 python3 rootfs/usr/local/sbin/skyglass-ledd 2>"$TMPH/led.log" &
 LEDD=$!
 HOME=$TMPH SKYGLASS_PORT=$PORT python3 rootfs/usr/lib/skyglass/shell/server.py >"$TMPH/server.log" 2>&1 &
 SRV=$!

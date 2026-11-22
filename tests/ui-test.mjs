@@ -95,6 +95,13 @@ try {
   check('flashlight tile turns the LED on', await evaluate("api('/api/led').then(r => r.active === 'flashlight')"));
   await evaluate("document.querySelector('[data-q=torch]').click()"); await sleep(500);
   check('flashlight tile turns it off', await evaluate("api('/api/led').then(r => r.active !== 'flashlight')"));
+  // quiet (low-urgency) notifications don't light the LED; normal ones do
+  await evaluate("api('/api/led', { cmd: 'clear', layer: 'notify' })");
+  await evaluate("api('/api/notify', { app: 'Updates', title: 'Skyglass 9.9 installed', urgency: 'low' })"); await sleep(1200);
+  check('quiet notification leaves the LED alone', await evaluate("api('/api/led').then(r => r.active !== 'notify')"));
+  await evaluate("api('/api/notify', { app: 'Messages', title: 'New message' })"); await sleep(1200);
+  check('normal notification blips the LED', await evaluate("api('/api/led').then(r => r.active === 'notify')"));
+  await evaluate("api('/api/notifications/dismiss', {}); api('/api/led', { cmd: 'clear', layer: 'notify' })"); await sleep(300);
   // notifications: one from the backend shows a banner, lands in the pull-down, and can be dismissed
   await evaluate("api('/api/notify', { app: 'UITest', title: 'Hello from the test', body: 'banner check' })"); await sleep(1500);
   check('notification shows a banner', await evaluate("[...document.querySelectorAll('#banners .ncard')].some(c => c.textContent.includes('Hello from the test'))"));
