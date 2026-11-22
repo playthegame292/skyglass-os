@@ -876,3 +876,132 @@ html.tablet #l-notifs { width: 560px; }
 .lt-sw button.on { outline: 3px solid #1c9df0; outline-offset: 2px; }
 .lt-row { display: flex; gap: 10px; padding: 4px 16px 10px; flex-wrap: wrap; }
 .lt-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: -2px; border: 1px solid rgba(0,40,80,.35); box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
+
+/* ================================================================== theme: old school
+   A classic grey 3D desktop: flat grey backdrop, bevelled grey windows with a cream title
+   bar, rectangular bevelled buttons, an icon bar along the bottom, no glass, no animation. */
+body.theme-oldschool {
+  --font: "DejaVu Sans", "Noto Sans", "Helvetica", sans-serif;
+  --ink: #000; --ink-soft: #333;
+  --os-grey: #dddddd; --os-mid: #bbbbbb; --os-dark: #777777; --os-cream: #ffeeaa; --os-blue: #0044aa;
+  --os-out: inset 2px 2px 0 #fff, inset -2px -2px 0 var(--os-dark);   /* raised bevel */
+  --os-in: inset 2px 2px 0 var(--os-dark), inset -2px -2px 0 #fff;    /* sunken bevel */
+  --radius: 0; font-size: 15px;
+}
+body.theme-oldschool *, body.theme-oldschool *::before, body.theme-oldschool *::after { animation: none !important; transition: none !important; }
+body.theme-oldschool .glass, body.theme-oldschool .win-body, body.theme-oldschool .shimmer { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+
+/* desktop backdrop: plain grey with a fine texture (no sky, sun, hills, bubbles or fish) */
+body.theme-oldschool #wall { background: repeating-linear-gradient(45deg, #b4b4b4 0 2px, #bcbcbc 2px 4px) !important; }
+body.theme-oldschool #wall > *, body.theme-oldschool #wall::after { display: none !important; }
+
+/* panels */
+body.theme-oldschool .glass { background: var(--os-grey); border: 1px solid #000; border-radius: 0; box-shadow: var(--os-out); color: #000; }
+
+/* status bar */
+body.theme-oldschool #statusbar { background: var(--os-grey); color: #000; text-shadow: none; border-bottom: 1px solid #000; box-shadow: var(--os-out); font-weight: 400; }
+body.theme-oldschool #sb-wifi { stroke: #000; } body.theme-oldschool #sb-wifi circle { fill: #000; }
+body.theme-oldschool .cell { border-color: #000; border-radius: 0; } body.theme-oldschool .cell::after { background: #000; border-radius: 0; }
+body.theme-oldschool .cell .fill { background: #00aa00; border-radius: 0; }
+body.theme-oldschool #sb-modem { border-color: #000; border-radius: 0; }
+body.theme-oldschool #sb-notif { background: var(--os-cream); color: #000; border: 1px solid #000; border-radius: 0; }
+
+/* home: clock in a window, icons as plain pictures with labels, icon bar at the bottom */
+body.theme-oldschool #home { padding: 14px 14px 0; }
+body.theme-oldschool #widget { border-radius: 0; }
+body.theme-oldschool #w-clock { font-weight: 400; letter-spacing: 0; }
+body.theme-oldschool .icon { background: var(--os-grey) !important; border: 1px solid #000; border-radius: 0; width: 58px; height: 58px; box-shadow: var(--os-out); }
+body.theme-oldschool .icon::before { display: none; }
+body.theme-oldschool .icon svg { stroke: #000; stroke-width: 1.8; filter: none; }
+body.theme-oldschool .icon svg .f { fill: #000; }
+body.theme-oldschool .app:active .icon { box-shadow: var(--os-in); transform: none; }
+body.theme-oldschool .label { color: #000; text-shadow: none; font-weight: 400; font-size: 13px; background: #fff; padding: 0 4px; border: 1px solid #000; }
+body.theme-oldschool #grid { grid-auto-rows: 100px; }
+body.theme-oldschool #dock { margin: 0 -14px; border-radius: 0; border: 0; border-top: 1px solid #000; background: var(--os-grey); padding: 8px 8px 30px; }
+body.theme-oldschool #dock .app::after { display: none; }
+body.theme-oldschool #dock .icon { width: 50px; height: 50px; border: 0; box-shadow: none; background: transparent !important; }
+body.theme-oldschool #dock .label { display: block; background: none; border: 0; font-size: 12px; }
+body.theme-oldschool #homebar div { background: #000; border-radius: 0; box-shadow: none; height: 4px; }
+
+/* windows: cream title bar, square tools, grey body with chunky scrollbars */
+body.theme-oldschool .win-title { height: 40px; background: var(--os-cream); color: #000; text-shadow: none; font-size: 16px; font-weight: 400;
+  border: 1px solid #000; box-shadow: var(--os-out); padding: 0 4px; gap: 4px; }
+body.theme-oldschool .win-title .t { text-align: center; }
+body.theme-oldschool .orb { width: 32px; height: 32px; border-radius: 0; background: var(--os-grey) !important; border: 1px solid #000; box-shadow: var(--os-out); }
+body.theme-oldschool .orb svg { stroke: #000; stroke-width: 2.4; }
+body.theme-oldschool .orb:active { box-shadow: var(--os-in); }
+body.theme-oldschool .win-body { background: var(--os-grey); border: 1px solid #000; border-top: 0; }
+body.theme-oldschool .win-body::-webkit-scrollbar { width: 18px; }
+body.theme-oldschool .win-body::-webkit-scrollbar-track { background: var(--os-mid); box-shadow: var(--os-in); }
+body.theme-oldschool .win-body::-webkit-scrollbar-thumb { background: var(--os-cream); border: 1px solid #000; box-shadow: var(--os-out); }
+
+/* buttons: rectangular, raised; the main action has a thick border */
+body.theme-oldschool .pill, body.theme-oldschool .btn, body.theme-oldschool .seg button, body.theme-oldschool .key, body.theme-oldschool .qt i {
+  background: var(--os-grey) !important; color: #000 !important; text-shadow: none !important; border: 1px solid #000; border-radius: 0 !important;
+  box-shadow: var(--os-out) !important; font-weight: 400; }
+body.theme-oldschool .btn.primary, body.theme-oldschool .pill.primary { outline: 3px solid var(--os-cream); outline-offset: 0; border-width: 2px; }
+body.theme-oldschool .btn:active, body.theme-oldschool .pill:active, body.theme-oldschool .key:active, body.theme-oldschool .qt:active i,
+body.theme-oldschool .seg button.on, body.theme-oldschool .key.on, body.theme-oldschool .qt.on i { box-shadow: var(--os-in) !important; filter: none; transform: none; }
+body.theme-oldschool .qt.on i { background: var(--os-cream) !important; }
+body.theme-oldschool .qt i svg, body.theme-oldschool .qt.on i svg, body.theme-oldschool .q-slider i svg { stroke: #000; }
+body.theme-oldschool .seg { border-radius: 0; border: 0; gap: 4px; }
+
+/* lists: white page, black text, selection inverts */
+body.theme-oldschool .list { background: #fff; border: 1px solid #000; border-radius: 0; box-shadow: var(--os-in); }
+body.theme-oldschool .li { border-bottom: 1px solid var(--os-mid); }
+body.theme-oldschool .li:active { background: #000; color: #fff; }
+body.theme-oldschool .li:active .sub, body.theme-oldschool .li:active svg { color: #fff; stroke: #fff; }
+body.theme-oldschool .li svg { stroke: #000; }
+body.theme-oldschool .section { color: #000; font-weight: 700; letter-spacing: 0; }
+
+/* writable fields: white, black border, red caret */
+body.theme-oldschool .field, body.theme-oldschool input[type=text], body.theme-oldschool textarea {
+  border-radius: 0; border: 1px solid #000; background: #fff; box-shadow: var(--os-in); caret-color: #d00; }
+body.theme-oldschool .field:focus { border-color: #000; box-shadow: var(--os-in); }
+
+/* toggles become tick boxes */
+body.theme-oldschool .switch { width: 28px; height: 28px; border-radius: 0; background: #fff; border: 1px solid #000; box-shadow: var(--os-in); }
+body.theme-oldschool .switch::after { display: none; }
+body.theme-oldschool .switch.on { background: #fff; }
+body.theme-oldschool .switch.on::before { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 22px; font-weight: 700; color: #000; }
+
+/* sliders: sunken well, square raised handle */
+body.theme-oldschool input[type=range] { border-radius: 0; background: var(--os-mid); border: 1px solid #000; box-shadow: var(--os-in); }
+body.theme-oldschool input[type=range]::-webkit-slider-thumb { border-radius: 0; background: var(--os-cream); border: 1px solid #000; box-shadow: var(--os-out); width: 22px; height: 26px; }
+
+/* pull-down, dialogue boxes, toasts, notifications */
+body.theme-oldschool #quick { border-radius: 0; left: 0; right: 0; }
+body.theme-oldschool .q-grip { background: #000; border-radius: 0; }
+body.theme-oldschool .modal-bg { background: rgba(0,0,0,.15); }
+body.theme-oldschool .modal { border-radius: 0; padding: 0 0 16px; }
+body.theme-oldschool .modal h2 { background: var(--os-cream); border-bottom: 1px solid #000; font-size: 16px; font-weight: 400; text-align: center; padding: 8px; margin: 0 0 12px; }
+body.theme-oldschool .modal > :not(h2) { margin-left: 16px; margin-right: 16px; }
+body.theme-oldschool .toast { border-radius: 0; font-weight: 400; }
+body.theme-oldschool .ncard { border-radius: 0; }
+body.theme-oldschool .ncard .n-ic { border-radius: 0; background: var(--os-grey); border: 1px solid #000; box-shadow: var(--os-out); }
+body.theme-oldschool .ncard .n-ic svg, body.theme-oldschool .ncard .n-x svg { stroke: #000; }
+body.theme-oldschool .ncard .n-x { border-radius: 0; background: var(--os-grey); border: 1px solid #000; box-shadow: var(--os-out); }
+body.theme-oldschool #q-notifs .ncard { background: #fff; }
+
+/* lock screen */
+body.theme-oldschool #lock { color: #000; text-shadow: none; background: none; }
+body.theme-oldschool #l-time { font-weight: 400; letter-spacing: 0; }
+body.theme-oldschool #l-card { border-radius: 0; }
+body.theme-oldschool .shimmer { border-radius: 0; background: var(--os-grey); border: 1px solid #000; box-shadow: var(--os-out); color: #000; font-weight: 400; }
+body.theme-oldschool .shimmer::before { display: none; }
+body.theme-oldschool .pin-wrap .pk { border-radius: 0 !important; background: var(--os-grey) !important; border: 1px solid #000 !important; box-shadow: var(--os-out) !important; color: #000 !important; text-shadow: none !important; }
+body.theme-oldschool .pin-wrap .pk:active { box-shadow: var(--os-in) !important; }
+body.theme-oldschool .pin-dots i { border-radius: 0; border-color: #000; }
+body.theme-oldschool .pin-dots i.on { background: #000; }
+
+/* on-screen keyboard */
+body.theme-oldschool #osk { background: var(--os-mid); border-top: 1px solid #000; box-shadow: none; }
+body.theme-oldschool #windows:not(:empty) ~ #homebar { background: var(--os-grey); border-top: 1px solid #000; box-shadow: none; }
+/* Light app: square, bevelled light and effect buttons */
+body.theme-oldschool .lt-orb { border-radius: 0; background: var(--os-grey); border: 1px solid #000; box-shadow: var(--os-out); }
+body.theme-oldschool .lt-orb svg { stroke: #000; }
+body.theme-oldschool .lt-orb.on { background: var(--os-cream); box-shadow: var(--os-in); }
+body.theme-oldschool .lt-fx button i, body.theme-oldschool .lt-sw button { border-radius: 0; border: 1px solid #000; box-shadow: var(--os-out); }
+body.theme-oldschool .lt-fx button.on i, body.theme-oldschool .lt-sw button.on { outline: 3px solid #000; box-shadow: var(--os-in); }
+body.theme-oldschool .lt-dot { border-radius: 0; border-color: #000; box-shadow: none; }
+body.theme-oldschool .empty svg { stroke: #000; opacity: .7; }

@@ -459,7 +459,7 @@ const WALL_FPS = () => (ON_DEVICE ? 20 : 30);
 let lastWall = 0;
 function wallVisible() {
   const covered = CURRENT && !$('#phone').classList.contains('locked');
-  return !covered && !document.hidden && !asleep && !saverOn && (S.bubbles || (S.eggs.aquarium && S.fish));
+  return !covered && !document.hidden && !asleep && !saverOn && S.theme !== 'oldschool' && (S.bubbles || (S.eggs.aquarium && S.fish));
 }
 function wallLoop() {
   if (!wallVisible()) { lastWall = 0; return setTimeout(wallLoop, 500); }
@@ -2811,7 +2811,7 @@ async function wifiPage(body) {
   scan();
 }
 function displayPage(body) {
-  const themes = [['sky', 'Sky'], ['aqua', 'Aqua'], ['aurora', S.eggs.aurora ? 'Aurora' : '???']];
+  const themes = [['sky', 'Sky'], ['aqua', 'Aqua'], ['oldschool', 'Old school'], ['aurora', S.eggs.aurora ? 'Aurora' : '???']];
   body.append(
     h('div', { class: 'section' }, 'THEME'),
     h('div', { class: 'pad' }, seg(themes, S.theme, v => { if (v === 'aurora' && !S.eggs.aurora) return toast('Locked. Some say it appears to those who know the code…'); S.theme = v; save(); })),

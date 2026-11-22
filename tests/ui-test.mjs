@@ -95,6 +95,13 @@ try {
   check('flashlight tile turns the LED on', await evaluate("api('/api/led').then(r => r.active === 'flashlight')"));
   await evaluate("document.querySelector('[data-q=torch]').click()"); await sleep(500);
   check('flashlight tile turns it off', await evaluate("api('/api/led').then(r => r.active !== 'flashlight')"));
+  // every theme renders the home screen and a settings window without errors
+  for (const th of ['oldschool', 'aqua', 'sky']) {
+    const before = errors.length;
+    await evaluate(`S.theme = '${th}'; save(); goHome(); openApp('settings', 'display')`); await sleep(600);
+    check(`theme "${th}" without errors`, errors.length === before && await evaluate("document.body.classList.contains('theme-" + th + "')"));
+    await evaluate('goHome()'); await sleep(200);
+  }
   // quiet (low-urgency) notifications don't light the LED; normal ones do
   await evaluate("api('/api/led', { cmd: 'clear', layer: 'notify' })");
   await evaluate("api('/api/notify', { app: 'Updates', title: 'Skyglass 9.9 installed', urgency: 'low' })"); await sleep(1200);

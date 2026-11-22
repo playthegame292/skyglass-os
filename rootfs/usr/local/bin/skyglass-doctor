@@ -55,7 +55,9 @@ systemctl cat getty@tty1 2>/dev/null | grep -q -- "--autologin $U" && pass "auto
 
 echo "Skyglass:"
 [ -f /usr/lib/skyglass/shell/server.py ] && python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" /usr/lib/skyglass/shell/server.py 2>/dev/null && pass "backend files OK" || fail "backend missing or broken" "re-run install-on-pi.sh"
-if curl -fs -m 3 http://127.0.0.1:7777/api/status >/dev/null 2>&1; then pass "backend running"; else
+# a few tries: right after an update or under heavy load one slow answer isn't a dead backend
+up=0; for _ in 1 2 3; do curl -fs -m 5 http://127.0.0.1:7777/api/status >/dev/null 2>&1 && { up=1; break; }; sleep 2; done
+if [ "$up" = 1 ]; then pass "backend running"; else
   pgrep -f skyglass-session >/dev/null && fail "backend not answering" "see ~$U/.cache/skyglass/shell.log" || echo "  - backend not running (normal if the UI is not started)"; fi
 L="$C/${now:-cage}.log"
 [ -s "$L" ] && { echo "  last UI log lines ($L):"; tail -n 6 "$L" | sed 's/^/      /'; }

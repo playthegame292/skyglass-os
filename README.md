@@ -29,7 +29,7 @@ Plain **Debian** underneath (no Android anywhere), a glossy **Frutiger Aero** ph
 | Terminal | xterm.js on a real bash pty with an Esc/Tab/Ctrl/arrow key row. nano and htop work |
 | Linux Apps | Every installed `.desktop` app, opened full screen. The Aero on-screen keyboard (squeekboard) pops up when an app's text field is focused and pushes the app up instead of covering it |
 | Android | Android apps through Waydroid (a real Android container, not an emulator). One-time **Set up Android** button. Android only runs while it's open |
-| Settings | Wi-Fi, **hotspot**, **Bluetooth pairing** (scan, pair, connect, forget), themes, **wallpaper** (4 drawn skies, shipped pictures, or any JPG/PNG/WebP of yours), glass/bubbles, brightness, screen sleep, rotation, sound, **notifications**, **keyboard** (on-screen keyboard, hardware layout, compositor), **Android**, **software updates** (apt with progress), about, power |
+| Settings | Themes: Sky, Aqua and **Old school** (a classic grey 3D desktop: bevelled windows, cream title bars, an icon bar). Wi-Fi, **hotspot**, **Bluetooth pairing** (scan, pair, connect, forget), **wallpaper** (4 drawn skies, shipped pictures, or any JPG/PNG/WebP of yours), glass/bubbles, brightness, screen sleep, rotation, sound, **notifications**, **keyboard** (on-screen keyboard, hardware layout, compositor), **Android**, **software updates** (apt with progress), about, power |
 
 ## Hardware
 
