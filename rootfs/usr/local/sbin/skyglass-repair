@@ -32,9 +32,13 @@ case "${1:-}" in
 esac
 mkdir -p "$STATE"
 
-# 1. was the last shutdown clean?
+# 1. was the last shutdown clean? (only answerable at boot: while the system runs, the mark is
+#    always there. --check reports what this boot's repair found instead)
 unclean=0
-if [ -e "$MARK" ]; then
+if [ "$CHECK" = 1 ]; then
+  [ -s "$REPORT" ] && python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('unclean') else 1)" "$REPORT" 2>/dev/null \
+    && note "This boot followed a power cut or freeze (already repaired at boot)."
+elif [ -e "$MARK" ]; then
   unclean=1
   rsts=$(od -An -tx1 /proc/device-tree/chosen/bootloader/rsts 2>/dev/null | tr -d ' \n')
   case "$rsts" in

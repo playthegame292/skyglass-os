@@ -55,6 +55,7 @@ grep -q kernel8 "$R/boot/config.txt" && grep -q root= "$R/boot/cmdline.txt" && o
 python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['unclean'] and any('Repaired 2' in n for n in d['notes'])" "$R/report.json" && ok "power cut noticed and reported" || bad "repair report"
 env $RENV bash rootfs/usr/local/sbin/skyglass-repair --shutdown; env $RENV bash rootfs/usr/local/sbin/skyglass-repair >/dev/null 2>&1
 python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert not d['unclean'] and not d['notes']" "$R/report.json" && ok "clean shutdown: nothing to report" || bad "clean shutdown detection"
+[ -z "$(env $RENV bash rootfs/usr/local/sbin/skyglass-repair --check | grep -v 'all good')" ] && ok "--check on a running system: no false power-cut alarm" || bad "--check reports a power cut on a healthy running system"
 echo "# edited" >>"$R/boot/config.txt"; env $RENV bash rootfs/usr/local/sbin/skyglass-repair >/dev/null 2>&1
 grep -q edited "$R/state/boot-backup/config.txt" && ok "your own config.txt edits become the new backup" || bad "boot backup update"
 rm -rf "$R"
