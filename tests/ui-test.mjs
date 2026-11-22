@@ -99,6 +99,9 @@ try {
   await evaluate("api('/api/led', { cmd: 'clear', layer: 'notify' })");
   await evaluate("api('/api/notify', { app: 'Updates', title: 'Skyglass 9.9 installed', urgency: 'low' })"); await sleep(1200);
   check('quiet notification leaves the LED alone', await evaluate("api('/api/led').then(r => r.active !== 'notify')"));
+  // an old screen (before an update) lit the LED for a quiet one: the new screen turns it off
+  await evaluate("api('/api/led', { cmd: 'set', layer: 'notify', effect: 'flash' })"); await evaluate("LIGHT.sync()"); await sleep(800);
+  check('a leftover notification light for quiet notifications is turned off', await evaluate("api('/api/led').then(r => r.active !== 'notify')"));
   await evaluate("api('/api/notify', { app: 'Messages', title: 'New message' })"); await sleep(1200);
   check('normal notification blips the LED', await evaluate("api('/api/led').then(r => r.active === 'notify')"));
   await evaluate("api('/api/notifications/dismiss', {}); api('/api/led', { cmd: 'clear', layer: 'notify' })"); await sleep(300);

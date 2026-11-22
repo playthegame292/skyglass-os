@@ -225,7 +225,7 @@ const LIGHT = (() => {
     egg(fx, secs) { led({ cmd: 'set', layer: 'egg', effect: fx, ttl: secs, speed: 1.5 }); },
     async sync() {   // after a UI restart: show what the LED is really doing
       const r = await api('/api/led');
-      if (r && r.layers) { torchOn = !!r.layers.flashlight; partyOn = !!r.layers.party; notifyOn = !!r.layers.notify; $$('.qt').forEach(q => q.dataset.q === 'torch' && q.classList.toggle('on', torchOn)); }
+      if (r && r.layers) { torchOn = !!r.layers.flashlight; partyOn = !!r.layers.party; notifyOn = !!r.layers.notify; if (notifyOn) setTimeout(renderNotifs, 0); $$('.qt').forEach(q => q.dataset.q === 'torch' && q.classList.toggle('on', torchOn)); }
       return r;
     },
   };
@@ -358,7 +358,8 @@ function openNotif(n, card) {
 function renderNotifs() {
   const list = NOTIFS.filter(notifShown);
   const unread = list.filter(n => !n.read).length;
-  if (!unread && LIGHT.notifyOn) LIGHT.notifyOff();
+  // the LED blips only for unread notifications that may light it (quiet "low" ones never do)
+  if (LIGHT.notifyOn && !list.some(n => !n.read && n.urgency !== 'low')) LIGHT.notifyOff();
   const badge = $('#sb-notif');
   badge.classList.toggle('hidden', !unread); badge.textContent = unread > 9 ? '9+' : unread;
   $('#sb-dnd').classList.toggle('hidden', !S.dnd);
