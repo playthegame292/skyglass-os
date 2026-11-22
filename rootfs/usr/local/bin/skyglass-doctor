@@ -19,8 +19,8 @@ if command -v labwc >/dev/null; then
   python3 -c "import sys, xml.dom.minidom as m; [m.parse(f) for f in sys.argv[1:]]" /etc/skyglass/labwc/rc.xml /etc/skyglass/labwc/menu.xml 2>/dev/null \
     && pass "labwc config OK" || fail "/etc/skyglass/labwc config missing or broken" "re-run install-on-pi.sh"
   command -v squeekboard >/dev/null && pass "squeekboard installed" || fail "squeekboard missing: Linux apps get no on-screen keyboard" "sudo apt install squeekboard"
-  S=/usr/share/glib-2.0/schemas
-  grep -qs 'screen-keyboard-enabled=true' $S/90_skyglass.gschema.override && [ $S/gschemas.compiled -nt $S/90_skyglass.gschema.override ] \
+  # ask GLib itself (comparing file dates fails: glib-compile-schemas leaves an unchanged file alone)
+  python3 -c "from gi.repository import Gio; import sys; sys.exit(0 if Gio.Settings.new('org.gnome.desktop.a11y.applications').get_boolean('screen-keyboard-enabled') else 1)" 2>/dev/null \
     && pass "keyboard pops up on text fields" || fail "screen-keyboard-enabled is off" "sudo glib-compile-schemas /usr/share/glib-2.0/schemas"
   command -v wlopm >/dev/null && pass "wlopm installed (display off while asleep)" || fail "wlopm missing" "sudo apt install wlopm"
 else
@@ -80,7 +80,7 @@ fi
 echo "Android (optional):"
 if command -v waydroid >/dev/null; then
   [ "$(getconf PAGESIZE)" = 4096 ] && pass "4K-page kernel" || fail "16K-page kernel: Android can't run" "skyglass-android setup, then sudo reboot"
-  ls /var/lib/waydroid/images/system.img /etc/waydroid-extra/images/system.img >/dev/null 2>&1 && pass "Android image downloaded" \
+  { [ -s /var/lib/waydroid/images/system.img ] || [ -s /etc/waydroid-extra/images/system.img ]; } && pass "Android image downloaded" \
     || fail "Waydroid installed but Android isn't downloaded (or the download was interrupted)" "skyglass-android setup"
   systemctl is-enabled waydroid-container.service >/dev/null 2>&1 \
     && fail "Android container starts at boot (drains the battery)" "sudo systemctl disable --now waydroid-container" \
