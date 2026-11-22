@@ -1,0 +1,24 @@
+#!/bin/bash
+# skyglass-pin — manage the lock-screen PIN from a terminal/SSH.
+#   skyglass-pin set      choose a new PIN
+#   skyglass-pin reset    remove the PIN (you'll pick a new one on next unlock)
+#   skyglass-pin status
+U=${SKYGLASS_USER:-skyglass}
+H=$(getent passwd "$U" | cut -d: -f6); H=${H:-$HOME}
+F="$H/.config/skyglass/pin.json"
+case "${1:-status}" in
+  status) [ -f "$F" ] && echo "PIN is set." || echo "No PIN set (you'll be asked to choose one on unlock)." ;;
+  reset)  sudo rm -f "$F" "$H/.config/skyglass/pin-fail.json" && echo "PIN removed. Lock the phone and swipe up to choose a new one." ;;
+  set)
+    read -rsp "New PIN (4-8 digits): " a; echo; read -rsp "Again: " b; echo
+    [ "$a" = "$b" ] || { echo "PINs did not match"; exit 1; }
+    [[ "$a" =~ ^[0-9]{4,8}$ ]] || { echo "PIN must be 4 to 8 digits"; exit 1; }
+    sudo -u "$U" mkdir -p "$(dirname "$F")"
+    PIN="$a" python3 -c '
+import hashlib, json, os, sys
+salt = os.urandom(16).hex()
+h = hashlib.pbkdf2_hmac("sha256", os.environ["PIN"].encode(), bytes.fromhex(salt), 200000).hex()
+json.dump({"salt": salt, "hash": h, "iter": 200000}, sys.stdout)' | sudo -u "$U" tee "$F" >/dev/null
+    sudo chmod 600 "$F"; sudo rm -f "$H/.config/skyglass/pin-fail.json"; echo "PIN set." ;;
+  *) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

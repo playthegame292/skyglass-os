@@ -1,0 +1,192 @@
+#!/bin/bash
+# skyglass-android: Android apps on Skyglass through Waydroid (an Android container, not an emulator).
+#
+#   skyglass-android setup        one-time setup (about 1 GB download, then one reboot)
+#   skyglass-android open [pkg]   start Android (and an app); stops Android again when closed
+#   skyglass-android stop         stop the Android container
+#   skyglass-android install F.apk  install an app (starts Android for it if needed)
+#   skyglass-android windowed on|off  each Android app in its own window, or the full Android screen
+#   skyglass-android status       what's set up and what's running
+#
+# The container only runs while Android is open, so it never drains the battery in the background.
+# "open" keeps running while Android is in use: the Skyglass power button (short press) ends it,
+# and that stops the container.
+set -uo pipefail
+BOOT=/boot/firmware; [ -d $BOOT ] || BOOT=/boot
+VAR=/var/lib/waydroid
+g=$'\e[32m'; y=$'\e[33m'; r=$'\e[31m'; n=$'\e[0m'
+say() { echo "${g}==>${n} $*"; }
+die() { echo "${r}✘${n} $*" >&2; exit 1; }
+as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
+
+pagesize() { getconf PAGESIZE; }
+binder_ok() { grep -qw binder /proc/filesystems || [ -e /dev/binder ] || [ -d /dev/binderfs ]; }
+# waydroid.cfg is written before the ~1 GB download, so it alone doesn't mean Android is there:
+# an interrupted download left it behind and everything thought setup was done
+images_dir() { sed -n 's/^images_path *= *//p' $VAR/waydroid.cfg 2>/dev/null | head -1; }
+initialized() {
+  local d; d=$(images_dir); d=${d:-$VAR/images}
+  [ -f $VAR/waydroid.cfg ] && { [ -s "$d/system.img" ] || [ -s /etc/waydroid-extra/images/system.img ]; } && \
+    { [ -s "$d/vendor.img" ] || [ -s /etc/waydroid-extra/images/vendor.img ]; }
+}
+running() { waydroid status 2>/dev/null | grep -Eq 'Session:[[:space:]]*RUNNING'; }
+
+# Android needs 4K memory pages. The Pi 5's default kernel (kernel_2712.img) uses 16K pages;
+# the same Raspberry Pi kernel built for 4K pages is kernel8.img (package linux-image-rpi-v8).
+use_4k_kernel() {
+  if [ ! -f $BOOT/kernel8.img ]; then
+    say "Installing the 4K-page Raspberry Pi kernel (kernel8.img)"
+    as_root apt-get install -y --no-install-recommends linux-image-rpi-v8 || die "could not install linux-image-rpi-v8"
+    if [ ! -f $BOOT/kernel8.img ]; then   # from-scratch image: no firmware hook copies it, so do it here
+      K=$(ls /boot | sed -n 's/^vmlinuz-\(.*-rpi-v8\)$/\1/p' | sort -V | tail -1)
+      [ -n "$K" ] || die "kernel8 (vmlinuz-*-rpi-v8) not found in /boot"
+      as_root cp "/boot/vmlinuz-$K" $BOOT/kernel8.img
+      [ -f "/boot/initrd.img-$K" ] && as_root cp "/boot/initrd.img-$K" $BOOT/initramfs8
+    fi
+  fi
+  # an older Skyglass wrote "kernel=kernel8.img  # comment": the firmware ignored that line
+  as_root sed -i 's|^kernel=kernel8.img  *#.*$|# skyglass-android: Android needs 4K pages\nkernel=kernel8.img|' $BOOT/config.txt
+  if ! grep -q '^kernel=kernel8.img$' $BOOT/config.txt; then
+    say "Switching the boot config to kernel8.img (undo: delete the line marked skyglass-android in $BOOT/config.txt)"
+    as_root cp $BOOT/config.txt $BOOT/config.txt.before-android
+    # config.txt has no end-of-line comments: the firmware would read them as part of the value
+    printf '\n[all]\n# skyglass-android: Android needs 4K pages\nkernel=kernel8.img\n' | as_root tee -a $BOOT/config.txt >/dev/null
+  fi
+}
+
+setup() {
+  [ "$(uname -m)" = aarch64 ] || die "Android needs the 64-bit (arm64) Pi kernel"
+  if [ "$(pagesize)" != 4096 ]; then
+    use_4k_kernel
+    echo
+    echo "${y}Reboot now, then run  skyglass-android setup  again to finish:${n}  sudo reboot"
+    exit 0
+  fi
+  binder_ok || die "this kernel has no binder (Android's IPC). Use the Raspberry Pi kernel (linux-image-rpi-v8)."
+
+  if ! command -v waydroid >/dev/null; then
+    say "Adding the Waydroid repository (repo.waydro.id: Waydroid isn't in Debian)"
+    DIST=${WAYDROID_DIST:-$(. /etc/os-release; echo "${VERSION_CODENAME:-trixie}")}
+    as_root apt-get install -y --no-install-recommends curl ca-certificates gnupg >/dev/null
+    curl -fsSL https://repo.waydro.id/waydroid.gpg | as_root tee /usr/share/keyrings/waydroid.gpg >/dev/null || die "could not download the Waydroid key"
+    echo "deb [signed-by=/usr/share/keyrings/waydroid.gpg] https://repo.waydro.id/ $DIST main" | as_root tee /etc/apt/sources.list.d/waydroid.list >/dev/null
+    as_root apt-get update || die "apt update failed (no Waydroid build for '$DIST'? try WAYDROID_DIST=bookworm)"
+    say "Installing waydroid"
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y waydroid || die "could not install waydroid"
+  fi
+  # never in the background: the container starts only while Android is open
+  as_root systemctl disable --now waydroid-container.service >/dev/null 2>&1 || true
+
+  if ! initialized; then
+    # Our downloader: 8 parallel parts (~15x faster than waydroid's own on a Pi), resumes
+    # after a power cut, checks SHA-256, keeps only the images. Waydroid uses images found in
+    # /etc/waydroid-extra/images instead of downloading them itself.
+    say "Downloading Android (LineageOS for Waydroid, about 1 GB, in 8 parallel parts)"
+    if ! as_root python3 /usr/lib/skyglass/android-fetch.py /etc/waydroid-extra/images; then
+      echo "${y}fast download failed, using Waydroid's own (slower) downloader${n}"
+    fi
+    say "Setting up Android"
+    as_root waydroid init -f || die "waydroid init failed. Check the network and run setup again."
+    initialized || die "the Android download didn't finish. Run setup again."
+  fi
+
+  say "Graphics: Mesa gralloc for the Pi's V3D GPU"
+  P=$VAR/waydroid_base.prop
+  for kv in ro.hardware.gralloc=minigbm_gbm_mesa ro.hardware.egl=mesa; do
+    k=${kv%%=*}
+    if as_root grep -q "^$k=" $P 2>/dev/null; then as_root sed -i "s|^$k=.*|$kv|" $P; else echo "$kv" | as_root tee -a $P >/dev/null; fi
+  done
+  as_root waydroid prop set persist.waydroid.multi_windows false >/dev/null 2>&1 || true
+
+  echo
+  echo "${g}✔ Android is ready.${n} Open the Android app on the home screen. Android apps you"
+  echo "  install also show up in Linux Apps."
+}
+
+start_android() {
+  as_root systemctl start waydroid-container.service || die "the Android container did not start (run: skyglass-android status)"
+  running && return 0
+  (waydroid session start >/dev/null 2>&1 &)
+  for _ in $(seq 90); do
+    if running; then
+      waydroid prop set persist.waydroid.multi_windows "$(windowed && echo true || echo false)" >/dev/null 2>&1
+      return 0
+    fi
+    sleep 1
+  done
+  die "Android did not start within 90 s"
+}
+
+WINDOWED_FLAG="$HOME/.config/skyglass/android-windowed"
+windowed() { [ -e "$WINDOWED_FLAG" ]; }
+set_windowed() {
+  case "${1:-}" in
+    on) mkdir -p "$(dirname "$WINDOWED_FLAG")"; touch "$WINDOWED_FLAG" ;;
+    off) rm -f "$WINDOWED_FLAG" ;;
+    *) die "usage: skyglass-android windowed on|off" ;;
+  esac
+  running && waydroid prop set persist.waydroid.multi_windows "$(windowed && echo true || echo false)" >/dev/null 2>&1
+  echo "Windowed mode: $1 (takes effect the next time Android starts)"
+}
+
+# other "open" wrappers still running? Then Android is still in use: leave it on.
+OPEN_DIR="${XDG_RUNTIME_DIR:-/tmp}/skyglass-android"
+others_open() {
+  for f in "$OPEN_DIR"/*; do
+    [ -e "$f" ] || continue
+    pid=${f##*/}
+    [ "$pid" = "$$" ] && continue
+    kill -0 "$pid" 2>/dev/null && return 0 || rm -f "$f"
+  done
+  return 1
+}
+
+install_apk() {
+  f=${1:-}; [ -f "$f" ] || die "no such file: $f"
+  command -v waydroid >/dev/null && initialized || die "Android isn't set up yet: skyglass-android setup"
+  was=0; running && was=1
+  start_android
+  waydroid app install "$f" || { [ $was = 1 ] || others_open || stop_android; die "installing $(basename "$f") failed"; }
+  sleep 2
+  [ $was = 1 ] || others_open || stop_android
+  echo "Installed $(basename "$f")"
+}
+
+stop_android() {
+  waydroid session stop >/dev/null 2>&1
+  as_root systemctl stop waydroid-container.service 2>/dev/null
+  return 0
+}
+
+open_android() {
+  command -v waydroid >/dev/null && initialized || die "Android isn't set up yet: skyglass-android setup"
+  [ "$(pagesize)" = 4096 ] || die "running the 16K-page kernel: run skyglass-android setup, then reboot"
+  mkdir -p "$OPEN_DIR"; : >"$OPEN_DIR/$$"
+  trap 'rm -f "$OPEN_DIR/$$"; others_open || stop_android; exit 0' TERM INT HUP
+  start_android
+  if [ -n "${1:-}" ]; then waydroid app launch "$1"; else waydroid show-full-ui; fi
+  # stay alive while Android is in use; when Skyglass closes us (power button), stop the container
+  while running; do sleep 3 & wait $!; done
+  rm -f "$OPEN_DIR/$$"
+  others_open || stop_android
+}
+
+status() {
+  ps=$(pagesize)
+  [ "$ps" = 4096 ] && echo "  ${g}✔${n} 4K-page kernel" || echo "  ${r}✘${n} ${ps}-byte pages (Android needs 4096): skyglass-android setup"
+  binder_ok && echo "  ${g}✔${n} binder in the kernel" || echo "  ${r}✘${n} no binder in this kernel"
+  command -v waydroid >/dev/null && echo "  ${g}✔${n} waydroid installed" || echo "  ${r}✘${n} waydroid not installed: skyglass-android setup"
+  initialized && echo "  ${g}✔${n} Android image downloaded" || echo "  ${r}✘${n} Android image not downloaded: skyglass-android setup"
+  windowed && echo "  ○ windowed mode (each app in its own window)" || echo "  ○ full-screen Android"
+  running && echo "  ${g}●${n} Android is running" || echo "  ○ Android is stopped"
+}
+
+case "${1:-}" in
+  setup) setup ;;
+  open) shift; open_android "${1:-}" ;;
+  stop) stop_android ;;
+  install) shift; install_apk "${1:-}" ;;
+  windowed) shift; set_windowed "${1:-}" ;;
+  status) status ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

@@ -1,0 +1,612 @@
+#!/usr/bin/python3
+"""skyglass-ledd: the RGB LED service (flashlight, status/error light, notification light, party).
+
+Drives plain RGB LEDs (e.g. HW-478 / KY-016 modules: R, G, B, common "-") on GPIO pins through
+the kernel's GPIO character device: no extra packages, no device-tree overlay. Dimming and
+colour mixing use software PWM, which only runs while a colour actually needs it (full on/off
+costs no CPU at all).
+
+It starts at boot as root, owns the pins, and listens on a Unix socket (skyglass-led, the
+Skyglass backend). It keeps working when the UI is gone, so it can still show an error.
+
+Layers, highest priority wins:  flashlight > alert (errors, warnings) > test > egg > party
+                                > notify > charge > boot
+Config: /etc/skyglass/led.conf     Socket: /run/skyglass-led/led.sock
+"""
+import fcntl
+import glob
+import grp
+import json
+import math
+import os
+import random
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+CONF = os.environ.get("SKYGLASS_LED_CONF", "/etc/skyglass/led.conf")
+SOCK = os.environ.get("SKYGLASS_LED_SOCK", "/run/skyglass-led/led.sock")
+PREFS_FILE = os.environ.get("SKYGLASS_LED_PREFS", "/var/lib/skyglass/led-prefs.json")
+
+FRAME_HZ = 50          # effect updates per second
+PWM_HZ = 160           # software PWM period
+LEVELS = 24            # PWM steps (quantised: keeps the number of GPIO writes per period small)
+GAMMA = 2.2
+
+PRIO = {"flashlight": 100, "alert": 90, "test": 85, "egg": 80, "party": 70, "notify": 50, "charge": 30, "boot": 20}
+DEFAULT_PREFS = {"notify": True, "charge": True, "alerts": True, "boot": True, "max": 1.0}
+COLORS = {"red": (1, 0, 0), "green": (0, 1, 0), "blue": (0, 0, 1), "white": (1, 1, 1), "warm": (1, .62, .25),
+          "cold": (.75, .88, 1), "orange": (1, .35, 0), "amber": (1, .55, 0), "yellow": (1, .85, 0),
+          "purple": (.6, 0, 1), "pink": (1, .2, .55), "cyan": (0, .9, 1), "aqua": (0, .7, 1), "off": (0, 0, 0)}
+
+
+def log(*a):
+    print("skyglass-ledd:", *a, file=sys.stderr, flush=True)
+
+
+def read_conf():
+    c = {"LEDS": "17,27,22", "ACTIVE_LOW": "0", "CHIP": "", "SOCKET_GROUP": "skyglass", "BACKEND": "gpio"}
+    try:
+        for line in open(CONF):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                c[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    groups = []
+    for g in c["LEDS"].replace(";", " ").split():
+        try:
+            pins = [int(p) for p in g.split(",")]
+        except ValueError:
+            continue
+        if len(pins) == 3:
+            groups.append(pins)
+    c["groups"] = groups
+    return c
+
+
+def color_of(v, default=(1, 1, 1)):
+    if isinstance(v, str):
+        v = v.strip().lower()
+        if v in COLORS:
+            return COLORS[v]
+        if v.startswith("#") and len(v) == 7:
+            try:
+                return tuple(int(v[i:i + 2], 16) / 255 for i in (1, 3, 5))
+            except ValueError:
+                return default
+        return default
+    if isinstance(v, (list, tuple)) and len(v) == 3:
+        try:
+            vals = [float(x) for x in v]
+        except (TypeError, ValueError):
+            return default
+        scale = 255 if max(vals) > 1 else 1
+        return tuple(max(0.0, min(1.0, x / scale)) for x in vals)
+    return default
+
+
+def hsv(h, s=1.0, v=1.0):
+    h = (h % 1.0) * 6
+    i, f = int(h), h - int(h)
+    p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+    return [(v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)][i % 6]
+
+
+# --------------------------------------------------------------------------- GPIO (chardev v2 uAPI)
+
+def _iowr(nr, size):
+    return (3 << 30) | (size << 16) | (0xB4 << 8) | nr
+
+
+GPIO_GET_CHIPINFO_IOCTL = (2 << 30) | (68 << 16) | (0xB4 << 8) | 0x01
+GPIO_V2_GET_LINE_IOCTL = _iowr(0x07, 592)
+GPIO_V2_LINE_SET_VALUES_IOCTL = _iowr(0x0F, 16)
+FLAG_ACTIVE_LOW, FLAG_OUTPUT = 1 << 1, 1 << 3
+REQ_FMT = "<64I32sQI5I240xII5Ii"     # struct gpio_v2_line_request (592 bytes)
+
+
+def find_chip(want=""):
+    """The 40-pin header's GPIO chip: pinctrl-rp1 on a Pi 5 (gpiochip0 or gpiochip4 by kernel)."""
+    best = None
+    for path in sorted(glob.glob("/dev/gpiochip*")):
+        if want and path != want:
+            continue
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            info = fcntl.ioctl(fd, GPIO_GET_CHIPINFO_IOCTL, bytes(68))
+            name, label, lines = struct.unpack("<32s32sI", info)
+            label = label.split(b"\0")[0].decode(errors="replace")
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+        if want:
+            return path, label
+        if label == "pinctrl-rp1" or label.startswith("pinctrl-bcm2"):
+            return path, label
+        if best is None and lines >= 28:
+            best = (path, label)
+    return best or (None, "")
+
+
+class GpioOut:
+    def __init__(self, chip, offsets, active_low):
+        self.n = len(offsets)
+        fd = os.open(chip, os.O_RDWR)
+        try:
+            flags = FLAG_OUTPUT | (FLAG_ACTIVE_LOW if active_low else 0)
+            offs = list(offsets) + [0] * (64 - len(offsets))
+            req = bytearray(struct.pack(REQ_FMT, *offs, b"skyglass-led", flags, 0, *([0] * 5),
+                                        len(offsets), 0, *([0] * 5), 0))
+            fcntl.ioctl(fd, GPIO_V2_GET_LINE_IOCTL, req)
+            self.fd = struct.unpack_from("<i", req, 588)[0]
+        finally:
+            os.close(fd)
+        self.all = (1 << self.n) - 1
+        self.set(0, self.all)
+
+    def set(self, bits, mask):
+        fcntl.ioctl(self.fd, GPIO_V2_LINE_SET_VALUES_IOCTL, struct.pack("<QQ", bits, mask))
+
+
+class SimOut:
+    """No GPIO (a PC, tests): remembers the last values so status can show them."""
+    def __init__(self, n):
+        self.n, self.all, self.bits = n, (1 << n) - 1, 0
+
+    def set(self, bits, mask):
+        self.bits = (self.bits & ~mask) | (bits & mask)
+
+
+# --------------------------------------------------------------------------- effects
+# Each effect: f(t, n, p) -> list of n (r, g, b) in 0..1, and whether it animates.
+
+def fx_solid(t, n, p):
+    return [p["color"]] * n
+
+
+def fx_blink(t, n, p):
+    on = (t * p["speed"]) % 1.0 < 0.5
+    return [p["color"] if on else (0, 0, 0)] * n
+
+
+def fx_blink_fast(t, n, p):
+    on = (t * 4) % 1.0 < 0.5
+    return [p["color"] if on else (0, 0, 0)] * n
+
+
+def fx_pulse(t, n, p):
+    k = 0.5 - 0.5 * math.cos(2 * math.pi * t * p["speed"] * 0.5)
+    return [tuple(c * k for c in p["color"])] * n
+
+
+def fx_heartbeat(t, n, p):  # the notification light: two short beats, then rest
+    x = (t * p["speed"] * 0.4) % 1.0
+    k = max(0.0, 1 - abs(x - 0.08) / 0.06) + max(0.0, 1 - abs(x - 0.24) / 0.06) * 0.7
+    return [tuple(c * min(1, k) for c in p["color"])] * n
+
+
+def fx_flash(t, n, p):  # a short blip every few seconds at full power: no PWM, almost no CPU
+    on = (t * p["speed"] / 3) % 1.0 < 0.04
+    return [p["color"] if on else (0, 0, 0)] * n
+
+
+def fx_rainbow(t, n, p):
+    return [hsv(t * p["speed"] * 0.15 + i / max(n, 1)) for i in range(n)]
+
+
+def fx_chase(t, n, p):
+    pos = (t * p["speed"] * 2) % max(n, 1)
+    out = []
+    for i in range(n):
+        d = min(abs(i - pos), n - abs(i - pos))
+        k = max(0.0, 1 - d)
+        out.append(tuple(c * k for c in (p["color"] if p.get("custom") else hsv(t * 0.1))))
+    return out
+
+
+def fx_strobe(t, n, p):
+    rate = min(max(p["speed"], 1), 10)   # capped at 10 flashes/s
+    on = (t * rate) % 1.0 < 0.18
+    return [p["color"] if on else (0, 0, 0)] * n
+
+
+def fx_police(t, n, p):
+    x = (t * p["speed"] * 0.8) % 1.0
+    flash = (x * 6) % 1.0 < 0.5
+    first = x < 0.5
+    out = []
+    for i in range(n):
+        left = i < n / 2 if n > 1 else first
+        lit = flash and (left == first)
+        out.append(((1, 0, 0) if left else (0, 0, 1)) if lit else (0, 0, 0))
+    if n == 1:
+        out = [((1, 0, 0) if first else (0, 0, 1)) if flash else (0, 0, 0)]
+    return out
+
+
+class Noise:
+    def __init__(self):
+        self.v, self.target, self.t = {}, {}, 0
+
+    def get(self, key, t, rate):
+        if t - self.target.get((key, "t"), -1) > 1 / rate:
+            self.target[(key, "t")] = t
+            self.target[key] = random.random()
+        cur = self.v.get(key, 0.5)
+        cur += (self.target.get(key, 0.5) - cur) * 0.25
+        self.v[key] = cur
+        return cur
+
+
+NOISE = Noise()
+
+
+def fx_candle(t, n, p):
+    out = []
+    for i in range(n):
+        k = 0.45 + 0.55 * NOISE.get(("candle", i), t, 9 * p["speed"])
+        out.append((1 * k, 0.42 * k * k, 0.06 * k))
+    return out
+
+
+def fx_disco(t, n, p):
+    step = int(t * p["speed"] * 2)
+    rnd = random.Random(step)
+    return [hsv(rnd.random()) for _ in range(n)]
+
+
+def fx_music(t, n, p):
+    lvl = STATE.music_level()
+    hue = t * 0.05
+    return [tuple(c * lvl for c in hsv(hue + i / max(n, 1) * 0.3)) for i in range(n)]
+
+
+def fx_sos(t, n, p):
+    # ... --- ...  in units of 0.2 s
+    pattern = "1010100011101110111000101010000000"
+    on = pattern[int(t / 0.2) % len(pattern)] == "1"
+    return [p["color"] if on else (0, 0, 0)] * n
+
+
+def fx_test(t, n, p):
+    seq = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1)]
+    c = seq[int(t) % 4]
+    # with several LEDs, also show which one is which: they light one after another in each colour
+    if n > 1:
+        idx = int(t * n) % n
+        return [c if i == idx or int(t) % 4 == 3 else (0, 0, 0) for i in range(n)]
+    return [c]
+
+
+def fx_boot(t, n, p):
+    k = 0.15 + 0.35 * (0.5 - 0.5 * math.cos(2 * math.pi * t * 0.4))
+    return [(0, 0.35 * k, k)] * n
+
+
+EFFECTS = {"solid": (fx_solid, False), "blink": (fx_blink, True), "blink-fast": (fx_blink_fast, True),
+           "pulse": (fx_pulse, True), "heartbeat": (fx_heartbeat, True), "flash": (fx_flash, True), "rainbow": (fx_rainbow, True),
+           "chase": (fx_chase, True), "strobe": (fx_strobe, True), "police": (fx_police, True),
+           "candle": (fx_candle, True), "disco": (fx_disco, True), "music": (fx_music, True),
+           "sos": (fx_sos, True), "test": (fx_test, True), "boot": (fx_boot, True)}
+
+
+# --------------------------------------------------------------------------- state
+
+class State:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.changed = threading.Event()
+        self.layers = {}
+        self.prefs = dict(DEFAULT_PREFS)
+        self.level, self.level_t = 0.0, 0.0
+        try:
+            with open(PREFS_FILE) as f:
+                saved = json.load(f)
+            self.prefs.update({k: saved[k] for k in DEFAULT_PREFS if k in saved})
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def save_prefs(self):
+        try:
+            os.makedirs(os.path.dirname(PREFS_FILE), exist_ok=True)
+            with open(PREFS_FILE + ".tmp", "w") as f:
+                json.dump(self.prefs, f)
+            os.replace(PREFS_FILE + ".tmp", PREFS_FILE)
+        except OSError as e:
+            log("could not save prefs:", e)
+
+    def set_layer(self, name, effect="solid", color=None, speed=1.0, brightness=1.0, ttl=0, severity=0):
+        kind = name.split(":")[0]
+        if kind not in PRIO or effect not in EFFECTS:
+            return False
+        try:
+            speed = max(0.05, min(20.0, float(speed)))
+            brightness = max(0.0, min(1.0, float(brightness)))
+            ttl = max(0.0, min(86400.0, float(ttl or 0)))
+        except (TypeError, ValueError):
+            return False
+        with self.lock:
+            self.layers[name] = {"effect": effect, "color": color_of(color), "speed": speed,
+                                 "brightness": brightness, "custom": color is not None,
+                                 "prio": PRIO[kind] + (2 if severity else 0), "since": time.monotonic(),
+                                 "until": time.monotonic() + ttl if ttl else 0}
+        self.changed.set()
+        return True
+
+    def clear(self, name):
+        with self.lock:
+            if name.endswith(":*") or name.endswith("*"):
+                pre = name.rstrip("*")
+                for k in [k for k in self.layers if k.startswith(pre)]:
+                    del self.layers[k]
+            else:
+                self.layers.pop(name, None)
+        self.changed.set()
+
+    def allowed(self, name):
+        kind = name.split(":")[0]
+        key = {"notify": "notify", "charge": "charge", "alert": "alerts", "boot": "boot"}.get(kind)
+        return self.prefs.get(key, True) if key else True
+
+    def top(self):
+        now = time.monotonic()
+        with self.lock:
+            for k in [k for k, v in self.layers.items() if v["until"] and v["until"] < now]:
+                del self.layers[k]
+            live = [(v["prio"], v["since"], k, v) for k, v in self.layers.items() if self.allowed(k)]
+        if not live:
+            return None, None
+        _, _, name, layer = max(live)
+        return name, layer
+
+    def beat(self, level):
+        try:
+            self.level, self.level_t = max(0.0, min(1.0, float(level))), time.monotonic()
+        except (TypeError, ValueError):
+            pass
+
+    def music_level(self):
+        age = time.monotonic() - self.level_t
+        return self.level * max(0.0, 1 - age * 3)   # fades out if the Music app stops sending
+
+
+STATE = State()
+
+
+# --------------------------------------------------------------------------- output loop
+
+class Engine(threading.Thread):
+    def __init__(self, out, groups):
+        super().__init__(daemon=True)
+        self.out, self.groups = out, groups
+        self.n = len(groups)
+        self.current = [(0, 0, 0)] * self.n
+        self.active = None
+
+    def frame(self):
+        name, layer = STATE.top()
+        self.active = name
+        if not layer or self.n == 0:
+            return [0] * (self.n * 3), False
+        fn, anim = EFFECTS[layer["effect"]]
+        t = time.monotonic() - layer["since"]
+        cols = fn(t, self.n, layer)
+        k = layer["brightness"] * float(STATE.prefs.get("max", 1.0))
+        self.current = [tuple(round(c * k, 3) for c in rgb) for rgb in cols]
+        levels = []
+        for rgb in cols:
+            for c in rgb:
+                v = max(0.0, min(1.0, c * k)) ** GAMMA
+                levels.append(int(round(v * LEVELS)))
+        return levels, anim or bool(layer["until"])
+
+    def run(self):
+        period = 1.0 / PWM_HZ
+        next_frame = 0.0
+        levels, anim = [0] * (self.n * 3), False
+        last_static = None
+        while True:
+            now = time.monotonic()
+            if now >= next_frame or STATE.changed.is_set():
+                STATE.changed.clear()
+                levels, anim = self.frame()
+                next_frame = now + 1.0 / FRAME_HZ
+            if all(lv in (0, LEVELS) for lv in levels):
+                bits = sum(1 << i for i, lv in enumerate(levels) if lv)
+                if bits != last_static:
+                    self.out.set(bits, self.out.all)
+                    last_static = bits
+                # nothing to dim: sleep until the next frame (animations) or until something changes
+                STATE.changed.wait(max(0.0, next_frame - time.monotonic()) if anim else 30)
+                continue
+            last_static = None
+            start = time.monotonic()
+            on = sum(1 << i for i, lv in enumerate(levels) if lv)
+            self.out.set(on, self.out.all)
+            for lv in sorted(set(lv for lv in levels if 0 < lv < LEVELS)):
+                off = sum(1 << i for i, x in enumerate(levels) if x == lv)
+                delay = start + period * lv / LEVELS - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                self.out.set(0, off)
+            delay = start + period - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+
+
+# --------------------------------------------------------------------------- watching the hardware
+
+def sysread(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def monitor():
+    """Independent of the UI: heat, under-voltage and charging."""
+    while True:
+        try:
+            temp = int(sysread("/sys/class/thermal/thermal_zone0/temp") or 0) / 1000
+            if temp >= 82:
+                STATE.set_layer("alert:heat", "pulse", "orange", speed=0.8)
+            elif temp and temp < 76:
+                STATE.clear("alert:heat")
+            thr = None
+            if os.access("/usr/bin/vcgencmd", os.X_OK):
+                try:
+                    out = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True, timeout=3).stdout
+                    thr = int(out.split("=")[1], 16) if "=" in out else None
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    thr = None
+            if thr is not None and thr & 0x1:
+                STATE.set_layer("alert:power", "blink", "amber", speed=1)
+            elif thr is not None:
+                STATE.clear("alert:power")
+            bat = None
+            for ps in sorted(glob.glob("/sys/class/power_supply/*")):
+                if sysread(ps + "/type") == "Battery":
+                    bat = ps
+                    break
+            if bat:
+                st, cap = sysread(bat + "/status"), sysread(bat + "/capacity")
+                pct = int(cap) if cap and cap.isdigit() else None
+                if st == "Charging" and (pct or 0) < 100:
+                    STATE.set_layer("charge", "solid", "orange", brightness=0.18)
+                elif st == "Full" or (st == "Charging" and pct == 100):
+                    STATE.set_layer("charge", "solid", "green", brightness=0.12)
+                else:
+                    STATE.clear("charge")
+        except Exception as e:  # noqa: BLE001 - the monitor must never die
+            log("monitor:", e)
+        time.sleep(10)
+
+
+# --------------------------------------------------------------------------- socket API
+
+INFO = {}
+
+
+def handle(cmd, engine):
+    c = cmd.get("cmd")
+    if c == "set":
+        name = str(cmd.get("layer", ""))
+        ok = STATE.set_layer(name, str(cmd.get("effect", "solid")), cmd.get("color"), cmd.get("speed", 1.0),
+                             cmd.get("brightness", 1.0), cmd.get("ttl", 0), cmd.get("severity", 0))
+        return {"ok": ok} if ok else {"ok": False, "message": "unknown layer or effect"}
+    if c == "clear":
+        STATE.clear(str(cmd.get("layer", "")))
+        return {"ok": True}
+    if c == "beat":
+        STATE.beat(cmd.get("level", 0))
+        return {"ok": True}
+    if c == "prefs":
+        for k, v in (cmd.get("prefs") or {}).items():
+            if k in ("notify", "charge", "alerts", "boot"):
+                STATE.prefs[k] = bool(v)
+            elif k == "max":
+                try:
+                    STATE.prefs["max"] = max(0.05, min(1.0, float(v)))
+                except (TypeError, ValueError):
+                    pass
+        STATE.save_prefs()
+        STATE.changed.set()
+        return {"ok": True, "prefs": STATE.prefs}
+    if c == "test":
+        STATE.set_layer("test", "test", ttl=4)
+        return {"ok": True}
+    if c == "status":
+        with STATE.lock:
+            layers = {k: {"effect": v["effect"], "prio": v["prio"]} for k, v in STATE.layers.items()}
+        return {"ok": True, "active": engine.active, "layers": layers, "prefs": STATE.prefs,
+                "leds": engine.n, "now": engine.current, "effects": sorted(EFFECTS), **INFO}
+    return {"ok": False, "message": "unknown command"}
+
+
+def serve(engine, group):
+    d = os.path.dirname(SOCK)
+    os.makedirs(d, exist_ok=True)
+    try:
+        os.unlink(SOCK)
+    except OSError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    if os.geteuid() == 0:
+        try:
+            gid = grp.getgrnam(group).gr_gid
+            os.chown(SOCK, 0, gid)
+            os.chown(d, 0, gid)
+            os.chmod(d, 0o750)
+        except (KeyError, OSError):
+            log(f"group '{group}' not found: only root can use the LED")
+        os.chmod(SOCK, 0o660)
+    srv.listen(8)
+
+    def client(conn):
+        with conn:
+            conn.settimeout(3)
+            try:
+                data = b""
+                while b"\n" not in data and len(data) < 8192:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                try:
+                    cmd = json.loads(data.decode() or "{}")
+                    reply = handle(cmd, engine) if isinstance(cmd, dict) else {"ok": False}
+                except ValueError:
+                    reply = {"ok": False, "message": "bad json"}
+                conn.sendall((json.dumps(reply) + "\n").encode())
+            except OSError:
+                pass
+
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=client, args=(conn,), daemon=True).start()
+
+
+def main():
+    conf = read_conf()
+    groups = conf["groups"]
+    offsets = [p for g in groups for p in g]
+    out = None
+    if conf["BACKEND"] != "sim" and offsets:
+        chip, label = find_chip(conf["CHIP"])
+        if chip:
+            try:
+                out = GpioOut(chip, offsets, conf["ACTIVE_LOW"] in ("1", "yes", "true"))
+                INFO.update(backend="gpio", chip=chip, chip_label=label)
+                log(f"{len(groups)} RGB LED(s) on {chip} ({label}), pins {conf['LEDS']}")
+            except OSError as e:
+                INFO.update(error=f"could not use pins {conf['LEDS']} on {chip}: {e.strerror}")
+                log(INFO["error"])
+        else:
+            INFO.update(error="no GPIO chip found")
+            log("no GPIO chip found: running without LEDs")
+    if out is None:
+        out = SimOut(len(offsets))
+        INFO.setdefault("backend", "sim")
+    INFO["pins"] = conf["LEDS"]
+    engine = Engine(out, groups)
+    engine.start()
+    if STATE.prefs.get("boot"):
+        STATE.set_layer("boot", "boot", ttl=180)   # the Skyglass backend clears it once the UI is up
+    if conf["BACKEND"] != "sim":
+        threading.Thread(target=monitor, daemon=True).start()
+    serve(engine, conf["SOCKET_GROUP"])
+
+
+if __name__ == "__main__":
+    main()

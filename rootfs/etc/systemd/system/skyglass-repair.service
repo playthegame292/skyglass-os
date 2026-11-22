@@ -1,0 +1,15 @@
+[Unit]
+Description=Skyglass self-repair (fixes what a power cut broke)
+After=local-fs.target
+Before=getty@tty1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/skyglass-repair
+# a clean shutdown removes the "running" mark, so the next boot knows it wasn't a power cut
+ExecStop=/usr/local/sbin/skyglass-repair --shutdown
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

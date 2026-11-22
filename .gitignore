@@ -1,0 +1,4 @@
+.skyglass-public-release
+__pycache__/
+*.img
+*.img.xz

@@ -1,0 +1,83 @@
+#!/bin/bash
+# skyglass-update: updates Skyglass OS from its GitHub releases.
+#
+#   skyglass-update              check, and install a newer release if there is one
+#   skyglass-update --check      only check (prints the installed and the latest version)
+#   skyglass-update --reinstall  install the latest release even if it's the same version
+#   skyglass-update --rollback   go back to the version installed before the last update
+#
+# The repository is set in /etc/skyglass/update.conf (REPO=owner/name). An update downloads
+# the release, runs its install-on-pi.sh (packages + files), and keeps the release as the
+# known-good copy that skyglass-repair restores damaged files from. The previous version is
+# kept for --rollback. Debian's own packages update separately (Settings › Software updates).
+set -uo pipefail
+[ "$(id -u)" = 0 ] || exec sudo -n "$0" "$@"
+CONF=/etc/skyglass/update.conf
+STATE=/var/lib/skyglass
+WORK=$STATE/update
+REPO=$(sed -n 's/^REPO=//p' $CONF 2>/dev/null | tr -d '"' | head -1)
+REPO=${REPO:-playthegame292/skyglass-os}
+INSTALLED=$(cat $STATE/source/VERSION 2>/dev/null || cat /usr/share/skyglass/VERSION 2>/dev/null || echo 0)
+say() { echo "==> $*"; }
+die() { echo "skyglass-update: $*" >&2; exit 1; }
+
+latest() {   # prints: tag<TAB>tarball url
+  curl -fsSL -m 20 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/latest" |
+    python3 -c 'import sys, json; d = json.load(sys.stdin); print(d["tag_name"] + "\t" + d["tarball_url"])'
+}
+newer() {   # is $1 newer than $2? (1.10.0 > 1.9.2)
+  python3 - "$1" "$2" <<'EOF'
+import re, sys
+v = lambda s: [int(x) for x in re.findall(r"\d+", s)] or [0]
+sys.exit(0 if v(sys.argv[1]) > v(sys.argv[2]) else 1)
+EOF
+}
+
+install_tree() {   # $1 = an unpacked release tree
+  local t=$1
+  [ -x "$t/install-on-pi.sh" ] && [ -d "$t/rootfs" ] || die "that release doesn't look like Skyglass (no install-on-pi.sh)"
+  say "Installing Skyglass $(cat "$t/VERSION" 2>/dev/null)"
+  SKYGLASS_UPDATE=1 bash "$t/install-on-pi.sh" || die "the installer failed (the previous version is still in place: skyglass-update --rollback)"
+}
+
+restart_ui() {   # new backend + UI files take effect (a few seconds of black screen)
+  curl -s -m 5 -X POST -d '{}' http://127.0.0.1:7777/api/ui/restart >/dev/null 2>&1 || true
+}
+
+case "${1:-}" in
+  --rollback)
+    [ -d $STATE/source.prev ] || die "no earlier version to go back to"
+    say "Going back to Skyglass $(cat $STATE/source.prev/VERSION 2>/dev/null)"
+    rm -rf $WORK; mkdir -p $WORK; cp -a $STATE/source.prev $WORK/tree
+    install_tree $WORK/tree
+    rm -rf $WORK
+    restart_ui
+    exit 0 ;;
+esac
+
+info=$(latest) || die "couldn't reach GitHub ($REPO). Is the phone online?"
+TAG=${info%%$'\t'*}; URL=${info#*$'\t'}
+LATEST=${TAG#v}
+echo "installed: $INSTALLED"
+echo "latest:    $LATEST  ($REPO)"
+if [ "${1:-}" = --check ]; then
+  newer "$LATEST" "$INSTALLED" && echo "update available" || echo "up to date"
+  exit 0
+fi
+if [ "${1:-}" != --reinstall ] && ! newer "$LATEST" "$INSTALLED"; then
+  echo "Skyglass is up to date."; exit 0
+fi
+
+say "Downloading Skyglass $LATEST"
+rm -rf $WORK; mkdir -p $WORK
+curl -fSL -m 600 --retry 3 -o $WORK/release.tar.gz "$URL" || die "download failed"
+mkdir $WORK/unpack && tar -xzf $WORK/release.tar.gz -C $WORK/unpack || die "the download is damaged"
+TREE=$(find $WORK/unpack -mindepth 1 -maxdepth 1 -type d | head -1)
+[ -n "$TREE" ] || die "the download is empty"
+mv "$TREE" $WORK/tree
+install_tree $WORK/tree
+rm -rf $WORK
+say "Skyglass $LATEST installed. The screen restarts to load it."
+skyglass-notify -a Updates "Skyglass $LATEST installed" "Updated from GitHub." >/dev/null 2>&1
+restart_ui
+exit 0

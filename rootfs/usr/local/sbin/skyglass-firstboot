@@ -1,0 +1,10 @@
+#!/bin/bash
+# Grow the root filesystem to fill the SD card / NVMe and regenerate machine identity.
+set -x
+ROOT=$(findmnt -no SOURCE /)
+DISK=/dev/$(lsblk -no PKNAME "$ROOT")
+PART=$(cat "/sys/class/block/${ROOT##*/}/partition")
+growpart "$DISK" "$PART" && resize2fs "$ROOT"
+rm -f /etc/ssh/ssh_host_*; dpkg-reconfigure -f noninteractive openssh-server 2>/dev/null || ssh-keygen -A
+rm -f /etc/machine-id /var/lib/dbus/machine-id; systemd-machine-id-setup
+mkdir -p /var/lib/skyglass; touch /var/lib/skyglass/firstboot-done

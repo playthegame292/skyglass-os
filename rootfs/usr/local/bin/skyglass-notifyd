@@ -1,0 +1,75 @@
+#!/usr/bin/python3
+"""skyglass-notifyd: the desktop notification service (org.freedesktop.Notifications) for Skyglass.
+
+Linux apps (and notify-send) send their notifications over D-Bus. This turns each one into a
+Skyglass notification (POST /api/notify), so it shows as a banner, in the pull-down and on the
+lock screen. Started by skyglass-session-inner, next to the UI.
+"""
+import json
+import os
+import sys
+import urllib.request
+
+try:
+    from gi.repository import Gio, GLib
+except ImportError:
+    sys.exit("skyglass-notifyd needs python3-gi (sudo apt install python3-gi)")
+
+API = "http://127.0.0.1:%s" % os.environ.get("SKYGLASS_PORT", "7777")
+XML = """<node><interface name="org.freedesktop.Notifications">
+ <method name="Notify">
+  <arg type="s" name="app_name" direction="in"/><arg type="u" name="replaces_id" direction="in"/>
+  <arg type="s" name="app_icon" direction="in"/><arg type="s" name="summary" direction="in"/>
+  <arg type="s" name="body" direction="in"/><arg type="as" name="actions" direction="in"/>
+  <arg type="a{sv}" name="hints" direction="in"/><arg type="i" name="expire_timeout" direction="in"/>
+  <arg type="u" name="id" direction="out"/>
+ </method>
+ <method name="CloseNotification"><arg type="u" name="id" direction="in"/></method>
+ <method name="GetCapabilities"><arg type="as" name="capabilities" direction="out"/></method>
+ <method name="GetServerInformation">
+  <arg type="s" name="name" direction="out"/><arg type="s" name="vendor" direction="out"/>
+  <arg type="s" name="version" direction="out"/><arg type="s" name="spec_version" direction="out"/>
+ </method>
+ <signal name="NotificationClosed"><arg type="u" name="id"/><arg type="u" name="reason"/></signal>
+ <signal name="ActionInvoked"><arg type="u" name="id"/><arg type="s" name="action_key"/></signal>
+</interface></node>"""
+
+
+def post(path, body):
+    req = urllib.request.Request(API + path, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return json.loads(r.read() or b"{}")
+    except (OSError, ValueError):
+        return {}
+
+
+def on_call(conn, sender, path, iface, method, params, inv):
+    if method == "Notify":
+        app, replaces, icon, summary, body, _actions, hints, _timeout = params.unpack()
+        urgency = {0: "low", 2: "critical"}.get(hints.get("urgency"), "normal")
+        r = post("/api/notify", {"app": app or "App", "title": summary, "body": body, "icon": icon,
+                                 "urgency": urgency, "key": f"dbus:{app}:{replaces}" if replaces else ""})
+        inv.return_value(GLib.Variant("(u)", (int(r.get("id") or 0),)))
+    elif method == "CloseNotification":
+        post("/api/notifications/dismiss", {"id": params.unpack()[0]})
+        inv.return_value(None)
+    elif method == "GetCapabilities":
+        inv.return_value(GLib.Variant("(as)", (["body", "persistence"],)))
+    elif method == "GetServerInformation":
+        inv.return_value(GLib.Variant("(ssss)", ("Skyglass", "Skyglass OS", "1.0", "1.2")))
+
+
+def main():
+    info = Gio.DBusNodeInfo.new_for_xml(XML).interfaces[0]
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    bus.register_object("/org/freedesktop/Notifications", info, on_call, None, None)
+    loop = GLib.MainLoop()
+    Gio.bus_own_name_on_connection(bus, "org.freedesktop.Notifications", Gio.BusNameOwnerFlags.REPLACE,
+                                   None, lambda *a: loop.quit())   # lost the name: exit, the session restarts us
+    loop.run()
+
+
+if __name__ == "__main__":
+    main()

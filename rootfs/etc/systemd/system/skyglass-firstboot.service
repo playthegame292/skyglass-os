@@ -1,0 +1,13 @@
+[Unit]
+Description=Skyglass OS first boot (grow root partition, new SSH host keys)
+ConditionPathExists=!/var/lib/skyglass/firstboot-done
+After=local-fs.target
+Before=getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/skyglass-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

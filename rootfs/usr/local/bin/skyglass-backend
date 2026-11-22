@@ -1,0 +1,7 @@
+#!/bin/bash
+# Keeps the Skyglass backend alive: if server.py ever crashes, it is back within a second.
+while :; do
+  python3 /usr/lib/skyglass/shell/server.py >>"$HOME/.cache/skyglass/shell.log" 2>&1
+  echo "[$(date '+%F %T')] backend exited ($?), restarting" >>"$HOME/.cache/skyglass/shell.log"
+  sleep 1
+done

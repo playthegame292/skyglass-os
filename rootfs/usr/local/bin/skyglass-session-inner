@@ -1,0 +1,79 @@
+#!/bin/bash
+# Runs inside the compositor (labwc or cage): rotate the panel, start the (self-restarting)
+# backend and, under labwc, the squeekboard keyboard for Linux apps, then the kiosk UI.
+# SKYGLASS_SAFE=1 (set by skyglass-session after repeated crashes) = software rendering + fresh browser profile.
+. /etc/skyglass/display.conf 2>/dev/null
+ROTATION=${ROTATION:-0}
+OUT=$(wlr-randr 2>/dev/null | awk '/^[A-Z]/{print $1; exit}')
+if [ -n "$OUT" ]; then
+  case "$ROTATION" in 90|180|270) wlr-randr --output "$OUT" --transform "$ROTATION" ;; *) wlr-randr --output "$OUT" --transform normal ;; esac
+  [ -n "$SCALE" ] && wlr-randr --output "$OUT" --scale "$SCALE"
+fi
+
+LOGDIR="$HOME/.cache/skyglass"; mkdir -p "$LOGDIR"
+# keep the backend log from growing forever
+[ -f "$LOGDIR/shell.log" ] && [ "$(stat -c %s "$LOGDIR/shell.log")" -gt 2000000 ] && mv "$LOGDIR/shell.log" "$LOGDIR/shell.log.old"
+
+# One session D-Bus for the backend, Linux apps, squeekboard and the notification service
+[ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ -S "$XDG_RUNTIME_DIR/bus" ] && export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-daemon >/dev/null; then
+  DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address 2>/dev/null) && export DBUS_SESSION_BUS_ADDRESS
+fi
+
+pkill -f '/usr/local/bin/skyglass-[b]ackend' 2>/dev/null
+pkill -f '/usr/lib/skyglass/shell/server[.]py' 2>/dev/null
+# $$ becomes chromium's PID after exec below; the backend's watchdog uses it to restart a frozen UI
+SKYGLASS_UI_PID=$$ setsid /usr/local/bin/skyglass-backend &
+for _ in $(seq 80); do (exec 3<>/dev/tcp/127.0.0.1/7777) 2>/dev/null && break; sleep 0.1; done
+
+# On-screen keyboard for Linux apps (labwc only: cage has no layer-shell/text-input).
+# It shows by itself when an app focuses a text field, and maximized apps shrink above it.
+# The shell UI brings its own keyboard, so it's never started with the Wayland IME flags.
+if [ "$SKYGLASS_COMPOSITOR" = labwc ] && command -v squeekboard >/dev/null; then
+  mkdir -p "$HOME/.local/share/squeekboard"
+  [ -f "$LOGDIR/squeekboard.log" ] && [ "$(stat -c %s "$LOGDIR/squeekboard.log")" -gt 1000000 ] && : >"$LOGDIR/squeekboard.log"
+  for css in style.css style-dark.css; do   # the Aero theme, unless you put your own there
+    [ -e "$HOME/.local/share/squeekboard/$css" ] || ln -s /usr/share/skyglass/squeekboard/style.css "$HOME/.local/share/squeekboard/$css"
+  done
+  BUS=(); [ -n "$DBUS_SESSION_BUS_ADDRESS" ] || BUS=(dbus-run-session --)
+  UI=$$   # becomes chromium's PID below: restart the keyboard if it crashes, stop with the UI
+  # Settings › Keyboard can switch it off (the flag file); it comes back within 2 s when switched on
+  ( while kill -0 "$UI" 2>/dev/null; do
+      [ -e "$HOME/.config/skyglass/no-squeekboard" ] || "${BUS[@]}" squeekboard >>"$LOGDIR/squeekboard.log" 2>&1
+      sleep 2
+    done ) &
+fi
+
+# Notifications from Linux apps (notify-send, GTK/Qt apps) → the Skyglass notification list
+if [ -n "$DBUS_SESSION_BUS_ADDRESS" ] && python3 -c 'import gi' 2>/dev/null; then
+  UI=$$
+  ( while kill -0 "$UI" 2>/dev/null; do /usr/local/bin/skyglass-notifyd >>"$LOGDIR/notifyd.log" 2>&1; sleep 3; done ) &
+fi
+
+# The page scales itself to the panel (CSS zoom). UI_SCALE=0.9 in /etc/skyglass/display.conf overrides it.
+URL="http://127.0.0.1:7777/${UI_SCALE:+?scale=$UI_SCALE}"
+PROFILE="$HOME/.local/share/skyglass/shell-profile"
+EXTRA=(--enable-gpu-rasterization)
+if [ -n "$SKYGLASS_SAFE" ]; then
+  echo "SAFE MODE: software rendering, fresh browser profile" >&2
+  [ -d "$PROFILE" ] && mv "$PROFILE" "$PROFILE.broken-$(date +%s)"
+  ls -dt "$PROFILE".broken-* 2>/dev/null | tail -n +3 | xargs -r rm -rf   # keep the last 2
+  EXTRA=(--disable-gpu --disable-gpu-compositing)
+fi
+
+# Start the real binary, not the /usr/bin/chromium wrapper: Raspberry Pi OS's wrapper adds
+# --force-renderer-accessibility (an accessibility tree rebuilt on every UI change: lots of CPU)
+# and background networking. The wrapper's one useful default, --use-angle=gles, is set here.
+CHROME=/usr/lib/chromium/chromium; [ -x "$CHROME" ] || CHROME=chromium
+exec "$CHROME" \
+  --ozone-platform=wayland --kiosk --app="$URL" \
+  --user-data-dir="$PROFILE" --use-angle=gles \
+  --no-first-run --noerrdialogs --disable-infobars --disable-session-crashed-bubble \
+  --disable-features=TranslateUI,OverscrollHistoryNavigation,MediaRouter,OptimizationHints,AutofillServerCommunication,Translate \
+  --overscroll-history-navigation=0 --disable-pinch --touch-events=enabled \
+  --autoplay-policy=no-user-gesture-required --password-store=basic --disk-cache-size=33554432 \
+  --check-for-update-interval=31536000 --disable-smooth-scrolling \
+  --disable-renderer-accessibility --disable-background-networking --disable-component-update \
+  --disable-sync --disable-default-apps --disable-extensions --disable-breakpad --no-pings --media-router=0 \
+  --disable-domain-reliability --no-default-browser-check \
+  --ignore-gpu-blocklist "${EXTRA[@]}"

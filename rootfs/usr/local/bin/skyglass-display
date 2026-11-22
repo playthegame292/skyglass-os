@@ -1,0 +1,159 @@
+#!/bin/bash
+# skyglass-display — Skyglass OS display + touchscreen "driver" layer.
+#
+# The Freenove 7" panel is driverless (HDMI video + USB HID multitouch, handled
+# by the kernel's hid-multitouch). What it does need is the glue a phone needs:
+# forced video mode when EDID is missing or wrong, rotation, and a touch calibration
+# matrix that follows the rotation. That glue lives here.
+#
+#   skyglass-display info                 show panels, modes, EDID name, touch devices
+#   skyglass-display rotate 0|90|180|270  rotate the UI and the touch input to match
+#   skyglass-display touch-cycle          rotation is right but touch is wrong? run until it lines up
+#   skyglass-display touch-matrix "a b c d e f"   set a custom libinput calibration matrix
+#   skyglass-display mode 1024x600@60     force a video mode on HDMI (for missing/bad EDID)
+#   skyglass-display mode auto            back to EDID
+#   skyglass-display panel hdmi|dsi       pick the HDMI or DSI version of the panel
+#   skyglass-display scale 1.25           make the UI bigger or smaller
+set -euo pipefail
+CONF=/etc/skyglass/display.conf
+RULE=/etc/udev/rules.d/99-skyglass-touch.rules
+BOOT=/boot/firmware
+[ -d "$BOOT" ] || BOOT=/boot
+
+need_root() { [ "$(id -u)" = 0 ] || exec sudo -n "$0" "$@"; }
+conf_get() { [ -f "$CONF" ] && . "$CONF"; eval "echo \${$1:-$2}"; }
+conf_set() {
+  mkdir -p "$(dirname "$CONF")"; touch "$CONF"
+  if grep -q "^$1=" "$CONF"; then sed -i "s|^$1=.*|$1=$2|" "$CONF"; else echo "$1=$2" >>"$CONF"; fi
+}
+matrix_for() {
+  case "$1" in
+    # wlroots turns the picture counter-clockwise for "90", so touch turns the other way.
+    # (Checked on the Freenove DSI panel: phone mode at 90 needs "0 -1 1 1 0 0".)
+    90)  echo "0 -1 1 1 0 0" ;;
+    180) echo "-1 0 1 0 -1 1" ;;
+    270) echo "0 1 0 -1 0 1" ;;
+    *)   echo "1 0 0 0 1 0" ;;
+  esac
+}
+# Touch for rotation $1, built from the saved calibration so rotating never loses it:
+#   matrix = R(new) x R(rotation at calibration)^-1 x calibrated matrix
+matrix_rotated() {
+  local cal calrot
+  cal=$(conf_get TOUCH_CAL ""); calrot=$(conf_get TOUCH_CAL_ROT 0)
+  if [ -z "$cal" ]; then matrix_for "$1"; return; fi
+  python3 - "$(matrix_for "$1")" "$(matrix_for "$calrot")" "$cal" <<'PY'
+import sys
+m = lambda s: [[float(v) for v in s.split()[i * 3:i * 3 + 3]] for i in range(2)] + [[0.0, 0.0, 1.0]]
+mul = lambda a, b: [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+def inv(a):  # affine 2x3 inverse
+    (p, q, r), (s, t, u) = a[0], a[1]
+    d = p * t - q * s
+    return [[t / d, -q / d, (q * u - t * r) / d], [-s / d, p / d, (s * r - p * u) / d], [0, 0, 1]]
+r = mul(m(sys.argv[1]), mul(inv(m(sys.argv[2])), m(sys.argv[3])))
+fmt = lambda v: ("%.4f" % v).rstrip("0").rstrip(".").replace("-0", "0") if abs(v) > 1e-9 else "0"
+print(" ".join(fmt(r[i][j]) for i in range(2) for j in range(3)))
+PY
+}
+write_touch_rule() {
+  cat >"$RULE" <<EOF
+# Written by skyglass-display — touchscreen calibration (rotation $(conf_get ROTATION 0))
+ACTION=="add|change", KERNEL=="event[0-9]*", ENV{ID_INPUT_TOUCHSCREEN}=="1", ENV{LIBINPUT_CALIBRATION_MATRIX}="$1"
+EOF
+  udevadm control --reload
+  udevadm trigger --subsystem-match=input --action=change || true
+}
+edid_name() {
+  # Monitor name lives in an EDID descriptor tagged 0xFC.
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys
+d = open(sys.argv[1], "rb").read()
+for off in (54, 72, 90, 108):
+    blk = d[off:off + 18]
+    if len(blk) == 18 and blk[0:3] == b"\0\0\0" and blk[3] == 0xFC:
+        print(blk[5:].split(b"\n")[0].decode("ascii", "replace").strip())
+PY
+}
+
+cmd=${1:-info}; shift || true
+case "$cmd" in
+  info)
+    echo "== Skyglass display =="
+    [ -f "$CONF" ] && sed 's/^/  conf: /' "$CONF"
+    for c in /sys/class/drm/card*-*; do
+      [ -e "$c/status" ] || continue
+      st=$(cat "$c/status"); name=${c##*/}
+      printf '  %-22s %s' "$name" "$st"
+      if [ "$st" = connected ]; then
+        [ -s "$c/edid" ] && printf '  EDID: %s' "$(edid_name "$c/edid")"
+        printf '\n    modes: %s' "$(tr '\n' ' ' <"$c/modes" | cut -c1-90)"
+      fi
+      echo
+    done
+    echo "  touch devices:"
+    for e in /dev/input/event*; do
+      if udevadm info -q property "$e" 2>/dev/null | grep -q '^ID_INPUT_TOUCHSCREEN=1'; then
+        n=$(cat "/sys/class/input/${e##*/}/device/name" 2>/dev/null)
+        m=$(udevadm info -q property "$e" | sed -n 's/^LIBINPUT_CALIBRATION_MATRIX=//p')
+        echo "    $e  $n  matrix: ${m:-identity}"
+      fi
+    done
+    ls /sys/class/backlight 2>/dev/null | sed 's/^/  backlight: /' || true
+    ;;
+  rotate)
+    need_root "$cmd" "$@"
+    deg=${1:?usage: rotate 0|90|180|270}
+    case "$deg" in 0|90|180|270) ;; *) echo "rotation must be 0, 90, 180 or 270" >&2; exit 1 ;; esac
+    conf_set ROTATION "$deg"
+    mtx=$(matrix_rotated "$deg")
+    conf_set TOUCH_MATRIX "\"$mtx\""
+    write_touch_rule "$mtx"
+    echo "Rotation $deg°. Restart the shell (Settings > Power > Restart shell) if it is not already restarting."
+    ;;
+  touch-cycle)
+    need_root "$cmd" "$@"
+    cur=$(conf_get TOUCH_MATRIX "1 0 0 0 1 0")
+    all=("1 0 0 0 1 0" "0 1 0 -1 0 1" "-1 0 1 0 -1 1" "0 -1 1 1 0 0" "-1 0 1 0 1 0" "1 0 0 0 -1 1" "0 1 0 1 0 0" "0 -1 1 -1 0 1")
+    next=${all[0]}
+    for i in "${!all[@]}"; do [ "${all[$i]}" = "$cur" ] && next=${all[$(( (i + 1) % ${#all[@]} ))]}; done
+    conf_set TOUCH_MATRIX "\"$next\""
+    conf_set TOUCH_CAL "\"$next\""; conf_set TOUCH_CAL_ROT "$(conf_get ROTATION 0)"
+    write_touch_rule "$next"
+    echo "Touch matrix now: $next  (restart the shell, then test with dialer code *#0*#)"
+    ;;
+  touch-matrix)
+    need_root "$cmd" "$@"
+    conf_set TOUCH_MATRIX "\"${1:?usage: touch-matrix \"a b c d e f\"}\""
+    # remember it as the calibration for the current rotation; rotating later keeps it
+    conf_set TOUCH_CAL "\"$1\""; conf_set TOUCH_CAL_ROT "$(conf_get ROTATION 0)"
+    write_touch_rule "$1"
+    ;;
+  mode)
+    need_root "$cmd" "$@"
+    m=${1:?usage: mode WIDTHxHEIGHT[@HZ] | auto}
+    f="$BOOT/cmdline.txt"
+    sed -i -E 's/ ?video=HDMI-A-[12]:[^ ]*//g' "$f"
+    if [ "$m" != auto ]; then
+      # "M" = compute CVT timings, "D" = force the output on even without hotplug/EDID
+      sed -i -E "1s|\$| video=HDMI-A-1:${m}MD video=HDMI-A-2:${m}MD|" "$f"
+    fi
+    conf_set MODE "$m"
+    echo "cmdline.txt: $(cat "$f")"; echo "Reboot to apply."
+    ;;
+  panel)
+    need_root "$cmd" "$@"
+    f="$BOOT/config.txt"
+    sed -i '/# skyglass-panel/d' "$f"
+    case "${1:?usage: panel hdmi|dsi}" in
+      hdmi) echo "hdmi_force_hotplug=1  # skyglass-panel" >>"$f" ;;
+      dsi)  echo "dtoverlay=vc4-kms-dsi-7inch  # skyglass-panel" >>"$f" ;;
+      *) echo "hdmi or dsi" >&2; exit 1 ;;
+    esac
+    conf_set PANEL "$1"; echo "Panel set to $1. Reboot to apply."
+    ;;
+  scale)
+    need_root "$cmd" "$@"
+    conf_set SCALE "${1:?usage: scale 1.0}"; echo "Scale $1 — restart the shell to apply."
+    ;;
+  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

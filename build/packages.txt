@@ -1,0 +1,58 @@
+# Debian trixie packages for Skyglass OS (one per line). The RPi repo provides
+# the kernel, firmware and camera stack; everything else is stock Debian.
+systemd-sysv
+systemd-timesyncd
+udev
+dbus
+sudo
+locales
+tzdata
+keyboard-configuration
+console-setup
+ca-certificates
+curl
+nano
+less
+htop
+bash-completion
+iproute2
+iputils-ping
+network-manager
+wpasupplicant
+openssh-server
+avahi-daemon
+bluez
+cloud-guest-utils
+e2fsprogs
+dosfstools
+initramfs-tools
+# --- Raspberry Pi 5 kernel + firmware (archive.raspberrypi.com)
+linux-image-rpi-2712
+raspi-firmware
+firmware-brcm80211
+rpi-eeprom
+rpicam-apps
+ffmpeg
+# --- shell / UI (labwc + squeekboard: keyboard in Linux apps; cage: the fallback compositor)
+labwc
+squeekboard
+wlopm
+dbus-user-session
+gsettings-desktop-schemas
+python3-gi
+libnotify-bin
+cage
+wlr-randr
+chromium
+python3
+fonts-open-sans
+fonts-dejavu-core
+fonts-noto-color-emoji
+libinput-tools
+evtest
+# --- sound + phone
+pipewire
+pipewire-pulse
+wireplumber
+alsa-utils
+modemmanager

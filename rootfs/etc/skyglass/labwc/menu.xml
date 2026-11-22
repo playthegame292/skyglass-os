@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Skyglass OS: no desktop right-click menu (the shell is the desktop). -->
+<openbox_menu>
+  <menu id="root-menu" label="Skyglass"/>
+  <menu id="client-menu" label="Window">
+    <item label="Close"><action name="Close"/></item>
+  </menu>
+</openbox_menu>

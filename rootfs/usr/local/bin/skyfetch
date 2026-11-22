@@ -1,0 +1,27 @@
+#!/bin/bash
+# skyfetch — system info, Skyglass style
+c1=$'\e[38;5;39m'; c2=$'\e[38;5;117m'; c3=$'\e[38;5;77m'; w=$'\e[1;97m'; r=$'\e[0m'
+model=$( { tr -d '\0' </proc/device-tree/model; } 2>/dev/null || uname -m)
+temp=$(awk '{printf "%.1f°C", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+mem=$(free -m | awk '/Mem:/{print $3" / "$2" MB"}')
+up=$(uptime -p | sed 's/up //')
+ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+mapfile -t L <<ART
+${c2}        .-~~~-.        ${r}
+${c2}     .-~  ${w}o${c2}    ~-.     ${r}
+${c1}    /   ${w}o${c1}   .-.   \\    ${r}
+${c1}   |   .-.  (   )   |   ${r}
+${c1}   |  (   )  '-'  ${w}o${c1} |   ${r}
+${c1}    \\  '-'   ${w}o${c1}     /    ${r}
+${c3}  ~~~'-._______.-'~~~  ${r}
+${c3} ~~~~~~~~~~~~~~~~~~~~~ ${r}
+ART
+I=("${w}$(whoami)${r}@${c1}skyglass${r}"
+   "${c1}OS${r}      Skyglass OS 1.0 \"Bubble\""
+   "${c1}Base${r}    Debian $(cat /etc/debian_version 2>/dev/null)"
+   "${c1}Device${r}  $model"
+   "${c1}Kernel${r}  $(uname -r)"
+   "${c1}Uptime${r}  $up"
+   "${c1}Memory${r}  $mem"
+   "${c1}Temp${r}    ${temp:-n/a}   ${c1}IP${r} ${ip:-offline}")
+for i in "${!L[@]}"; do printf '%s  %s\n' "${L[$i]}" "${I[$i]}"; done

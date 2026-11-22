@@ -1,0 +1,106 @@
+#!/bin/bash
+# skyglass-repair: runs at every boot, before the UI. Repairs what a power cut (someone
+# unplugging the phone, a weak power supply) can break, so the phone heals itself:
+#
+#  - notices the last shutdown wasn't clean, and tells you (a notification once the UI is up)
+#  - finishes a package install/update that a power cut interrupted (dpkg --configure -a)
+#  - checks every installed Skyglass file against its checksum and restores damaged or
+#    missing ones from the known-good copy in /var/lib/skyglass/source
+#  - restores config.txt / cmdline.txt on the boot partition if they got emptied or garbled
+#    (the FAT boot partition is the most fragile part of an SD card)
+#  - removes half-written temp files the Skyglass backend left behind
+#
+#   skyglass-repair            what the boot service runs
+#   skyglass-repair --check    only report, change nothing
+#   skyglass-repair --shutdown marks a clean shutdown (the service runs this on stop)
+set -uo pipefail
+STATE=${SKYGLASS_STATE:-/var/lib/skyglass}
+SRC=$STATE/source              # the installed release, kept as the repair source
+MANIFEST=$STATE/manifest.sha256
+BOOTBAK=$STATE/boot-backup
+MARK=$STATE/running            # exists while the system runs; still there at boot = unclean shutdown
+REPORT=${SKYGLASS_REPAIR_REPORT:-/run/skyglass-repair.json}
+BOOT=${SKYGLASS_BOOT:-/boot/firmware}; [ -d $BOOT ] || BOOT=/boot
+CHECK=0
+notes=()
+log() { echo "skyglass-repair: $*"; }
+note() { notes+=("$1"); log "$1"; }
+
+case "${1:-}" in
+  --shutdown) rm -f "$MARK"; sync; exit 0 ;;
+  --check) CHECK=1 ;;
+esac
+mkdir -p "$STATE"
+
+# 1. was the last shutdown clean?
+unclean=0
+if [ -e "$MARK" ]; then
+  unclean=1
+  rsts=$(od -An -tx1 /proc/device-tree/chosen/bootloader/rsts 2>/dev/null | tr -d ' \n')
+  case "$rsts" in
+    00001000) note "The phone lost power without shutting down (unplugged, or the power supply dropped out)." ;;
+    *) note "The phone didn't shut down cleanly last time (it froze, or lost power)." ;;
+  esac
+fi
+[ "$CHECK" = 1 ] || date +%s >"$MARK"
+
+# 2. a package install or update cut off half way
+if [ -z "${SKYGLASS_STATE:-}" ] && [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+  if [ "$CHECK" = 1 ]; then note "An interrupted package install needs finishing (dpkg --configure -a)."
+  else
+    DEBIAN_FRONTEND=noninteractive dpkg --force-confold --configure -a >/dev/null 2>&1 \
+      && note "Finished a package install that a power cut had interrupted." \
+      || note "A package install was interrupted and couldn't be finished. Run: sudo apt -f install"
+  fi
+fi
+
+# 3. Skyglass's own files: compare with the checksums written at install time
+fixed=0; bad=0
+if [ -s "$MANIFEST" ] && [ -d "$SRC/rootfs" ]; then
+  while IFS= read -r line; do
+    case "$line" in *": FAILED"*) f=${line%: FAILED*} ;; *) continue ;; esac
+    rel=${f#/}
+    if [ ! -e "$SRC/rootfs/$rel" ]; then bad=$((bad + 1)); continue; fi
+    if [ "$CHECK" = 1 ]; then bad=$((bad + 1)); continue; fi
+    mkdir -p "$(dirname "$f")"
+    cp -a --no-preserve=ownership "$SRC/rootfs/$rel" "$f.skyglass-repair" && mv -f "$f.skyglass-repair" "$f" && fixed=$((fixed + 1))
+    case "$f" in /etc/sudoers.d/*) chmod 0440 "$f" ;; esac
+  done < <(cd / && sha256sum -c --quiet "$MANIFEST" 2>/dev/null)
+  [ "$fixed" -gt 0 ] && note "Repaired $fixed damaged Skyglass file(s) from the known-good copy."
+  [ "$bad" -gt 0 ] && note "$bad Skyglass file(s) are damaged$( [ "$CHECK" = 1 ] && echo '' || echo ' and could not be restored: reinstall with skyglass-update --reinstall')."
+fi
+
+# 4. the boot partition: config.txt / cmdline.txt emptied or garbled by a power cut
+for f in config.txt cmdline.txt; do
+  cur=$BOOT/$f; bak=$BOOTBAK/$f
+  [ -s "$bak" ] || continue
+  okfile=1
+  [ -s "$cur" ] || okfile=0
+  if [ "$f" = cmdline.txt ] && ! grep -q 'root=' "$cur" 2>/dev/null; then okfile=0; fi
+  if [ "$f" = config.txt ] && grep -qP '[\x00-\x08\x0e-\x1f]' "$cur" 2>/dev/null; then okfile=0; fi
+  if [ "$okfile" = 0 ]; then
+    if [ "$CHECK" = 1 ]; then note "$cur is damaged."
+    else cp "$bak" "$cur.tmp" && mv -f "$cur.tmp" "$cur" && sync && note "Restored a damaged $cur from its backup."; fi
+  elif [ "$CHECK" = 0 ] && ! cmp -s "$cur" "$bak"; then
+    cp "$cur" "$bak"   # a healthy, changed file (you edited it): that's the new backup
+  fi
+done
+
+# 5. half-written temp files (atomic writes that never got renamed)
+if [ "$CHECK" = 0 ]; then
+  for home in /home/*; do
+    find "$home/.config/skyglass" -maxdepth 1 -name '*.tmp' -delete 2>/dev/null
+  done
+fi
+
+# report for the UI (the backend turns this into a notification)
+if [ "$CHECK" = 0 ]; then
+  python3 - "$REPORT" "$unclean" "${notes[@]}" <<'EOF'
+import json, sys, time
+path, unclean, notes = sys.argv[1], sys.argv[2] == "1", sys.argv[3:]
+json.dump({"time": int(time.time()), "unclean": unclean, "notes": notes}, open(path, "w"))
+EOF
+  chmod 644 "$REPORT"
+fi
+[ ${#notes[@]} -eq 0 ] && log "all good"
+exit 0

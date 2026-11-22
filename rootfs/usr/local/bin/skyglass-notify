@@ -1,0 +1,20 @@
+#!/bin/bash
+# skyglass-notify: show a notification on the phone, from a script, cron job or over SSH.
+#   skyglass-notify "Backup done" "42 photos copied to the USB drive"
+#   skyglass-notify -a Backup -u critical "Backup failed" "The drive is full"
+app=Terminal urgency=normal
+while getopts "a:u:" o; do case $o in a) app=$OPTARG ;; u) urgency=$OPTARG ;; *) exit 2 ;; esac; done
+shift $((OPTIND - 1))
+[ -n "${1:-}" ] || { sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+exec python3 - "$app" "$urgency" "$1" "${2:-}" <<'EOF'
+import json, sys, urllib.request
+app, urgency, title, body = sys.argv[1:5]
+req = urllib.request.Request("http://127.0.0.1:7777/api/notify", method="POST",
+                             data=json.dumps({"app": app, "urgency": urgency, "title": title, "body": body}).encode(),
+                             headers={"Content-Type": "application/json"})
+try:
+    ok = json.load(urllib.request.urlopen(req, timeout=5)).get("ok")
+except OSError as e:
+    sys.exit(f"skyglass-notify: the Skyglass shell isn't running ({e})")
+sys.exit(0 if ok else 1)
+EOF

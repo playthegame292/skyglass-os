@@ -1,0 +1,101 @@
+#!/bin/bash
+# skyglass-doctor — checks everything Skyglass needs and says what's wrong, in plain words.
+ok=0; bad=0
+g=$'\e[32m'; y=$'\e[33m'; r=$'\e[31m'; n=$'\e[0m'
+pass() { echo "  ${g}✔${n} $1"; ok=$((ok + 1)); }
+fail() { echo "  ${r}✘${n} $1"; [ -n "$2" ] && echo "      ${y}fix:${n} $2"; bad=$((bad + 1)); }
+U=${SKYGLASS_USER:-skyglass}
+
+echo "Skyglass doctor"
+echo "Programs:"
+for p in cage chromium wlr-randr python3 nmcli; do
+  command -v "$p" >/dev/null && pass "$p installed" || fail "$p missing" "sudo apt install $( [ "$p" = nmcli ] && echo network-manager || echo "$p")"
+done
+
+echo "Compositor & keyboard:"
+H=$(getent passwd "$U" | cut -d: -f6); C="$H/.cache/skyglass"
+if command -v labwc >/dev/null; then
+  pass "labwc installed (keyboard for Linux apps)"
+  python3 -c "import sys, xml.dom.minidom as m; [m.parse(f) for f in sys.argv[1:]]" /etc/skyglass/labwc/rc.xml /etc/skyglass/labwc/menu.xml 2>/dev/null \
+    && pass "labwc config OK" || fail "/etc/skyglass/labwc config missing or broken" "re-run install-on-pi.sh"
+  command -v squeekboard >/dev/null && pass "squeekboard installed" || fail "squeekboard missing: Linux apps get no on-screen keyboard" "sudo apt install squeekboard"
+  S=/usr/share/glib-2.0/schemas
+  grep -qs 'screen-keyboard-enabled=true' $S/90_skyglass.gschema.override && [ $S/gschemas.compiled -nt $S/90_skyglass.gschema.override ] \
+    && pass "keyboard pops up on text fields" || fail "screen-keyboard-enabled is off" "sudo glib-compile-schemas /usr/share/glib-2.0/schemas"
+  command -v wlopm >/dev/null && pass "wlopm installed (display off while asleep)" || fail "wlopm missing" "sudo apt install wlopm"
+else
+  fail "labwc missing: running on cage (no on-screen keyboard in Linux apps)" "sudo apt install labwc squeekboard wlopm"
+fi
+python3 -c 'import gi' 2>/dev/null && pass "notification service (Linux apps → Skyglass notifications)" \
+  || fail "python3-gi missing: Linux apps' notifications won't show" "sudo apt install python3-gi"
+now=$(cat "$C/compositor" 2>/dev/null)
+if [ -n "$now" ]; then
+  if [ "$now" = labwc ] || ! command -v labwc >/dev/null || grep -qs '^COMPOSITOR=cage' /etc/skyglass/display.conf; then pass "UI running on $now"
+  else fail "UI fell back to cage: labwc crashed twice" "see $C/labwc.log"; fi
+fi
+
+echo "Graphics & screen:"
+ls /dev/dri/card* >/dev/null 2>&1 && pass "GPU device present ($(ls /dev/dri | tr '\n' ' '))" \
+  || fail "no /dev/dri — the KMS graphics driver isn't loaded" "make sure /boot/firmware/config.txt has: dtoverlay=vc4-kms-v3d"
+conn=$(grep -l '^connected' /sys/class/drm/card*-*/status 2>/dev/null | head -1)
+[ -n "$conn" ] && pass "screen connected: $(basename "$(dirname "$conn")")" \
+  || fail "no screen detected" "check the micro-HDMI cable (use the port next to USB-C power), or: skyglass-display mode 1024x600@60"
+for e in /dev/input/event*; do
+  udevadm info -q property "$e" 2>/dev/null | grep -q '^ID_INPUT_TOUCHSCREEN=1' && { pass "touchscreen found ($e)"; t=1; break; }
+done
+[ -n "$t" ] || fail "no touchscreen found" "plug the panel's USB 'Touch' cable into a Pi USB port"
+
+echo "User & permissions:"
+id "$U" >/dev/null 2>&1 && pass "user '$U' exists" || fail "user '$U' missing" "re-run install-on-pi.sh"
+for grp in video render input; do
+  id -nG "$U" 2>/dev/null | grep -qw "$grp" && pass "$U is in group $grp" || fail "$U not in group $grp" "sudo usermod -aG $grp $U && sudo reboot"
+done
+sudo -n -u "$U" sudo -n true 2>/dev/null && pass "passwordless sudo works" || fail "sudo asks for a password" "check /etc/sudoers.d/010-skyglass (must be owned by root, mode 0440)"
+systemctl cat getty@tty1 2>/dev/null | grep -q -- "--autologin $U" && pass "autologin on the touchscreen" || fail "autologin not set" "re-run install-on-pi.sh"
+
+echo "Skyglass:"
+[ -f /usr/lib/skyglass/shell/server.py ] && python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" /usr/lib/skyglass/shell/server.py 2>/dev/null && pass "backend files OK" || fail "backend missing or broken" "re-run install-on-pi.sh"
+if curl -fs -m 3 http://127.0.0.1:7777/api/status >/dev/null 2>&1; then pass "backend running"; else
+  pgrep -f skyglass-session >/dev/null && fail "backend not answering" "see ~$U/.cache/skyglass/shell.log" || echo "  - backend not running (normal if the UI is not started)"; fi
+L="$C/${now:-cage}.log"
+[ -s "$L" ] && { echo "  last UI log lines ($L):"; tail -n 6 "$L" | sed 's/^/      /'; }
+
+echo "Self-repair & updates:"
+systemctl is-enabled --quiet skyglass-repair 2>/dev/null && pass "self-repair runs at every boot" || fail "self-repair is off" "sudo systemctl enable skyglass-repair"
+[ -s /var/lib/skyglass/manifest.sha256 ] && [ -d /var/lib/skyglass/source/rootfs ] && pass "known-good copy of Skyglass $(cat /var/lib/skyglass/source/VERSION 2>/dev/null) for repairs" \
+  || fail "no known-good copy to repair from" "re-run install-on-pi.sh (or: skyglass-update --reinstall)"
+rc=$(sudo -n skyglass-repair --check 2>/dev/null | grep -v "all good" | sed 's/^skyglass-repair: //')
+[ -z "$rc" ] && pass "all Skyglass files intact" || fail "$rc" "sudo skyglass-repair"
+[ -d /var/log/journal ] && pass "system log kept across reboots (shows what happened before a power cut)" || fail "system log is lost at every reboot" "sudo mkdir -p /var/log/journal && sudo systemctl restart systemd-journald"
+
+echo "RGB LED (optional):"
+if systemctl is-active --quiet skyglass-led 2>/dev/null; then
+  st=$(skyglass-led status 2>/dev/null)
+  if echo "$st" | grep -q '"backend": "gpio"'; then pass "LED service running ($(echo "$st" | sed -n 's/.*"pins": "\([^"]*\)".*/pins \1/p'))"
+  else fail "LED service runs but can't use the pins: $(echo "$st" | sed -n 's/.*"error": "\([^"]*\)".*/\1/p')" "check LEDS= in /etc/skyglass/led.conf, then: sudo systemctl restart skyglass-led"; fi
+else
+  echo "  - LED service not running (optional: sudo systemctl enable --now skyglass-led)"
+fi
+
+echo "Android (optional):"
+if command -v waydroid >/dev/null; then
+  [ "$(getconf PAGESIZE)" = 4096 ] && pass "4K-page kernel" || fail "16K-page kernel: Android can't run" "skyglass-android setup, then sudo reboot"
+  ls /var/lib/waydroid/images/system.img /etc/waydroid-extra/images/system.img >/dev/null 2>&1 && pass "Android image downloaded" \
+    || fail "Waydroid installed but Android isn't downloaded (or the download was interrupted)" "skyglass-android setup"
+  systemctl is-enabled waydroid-container.service >/dev/null 2>&1 \
+    && fail "Android container starts at boot (drains the battery)" "sudo systemctl disable --now waydroid-container" \
+    || pass "Android only runs while open"
+else
+  echo "  - not set up (optional: skyglass-android setup)"
+fi
+
+echo "System:"
+avail=$(df --output=avail -m / | tail -1)
+[ "$avail" -gt 500 ] && pass "free space: ${avail} MB" || fail "SD card almost full (${avail} MB)" "sudo apt clean; sudo journalctl --vacuum-size=50M"
+temp=$(($(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0) / 1000))
+[ "$temp" -lt 80 ] && pass "CPU temperature ${temp}°C" || fail "CPU hot: ${temp}°C" "add the Pi 5 active cooler"
+thr=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)
+[ -z "$thr" ] || [ "$thr" = 0x0 ] && pass "power supply OK" || fail "under-voltage/throttling detected ($thr)" "use the official 27W USB-C supply"
+
+echo
+[ "$bad" = 0 ] && echo "${g}All $ok checks passed.${n}" || echo "${r}$bad problem(s)${n}, $ok OK. Fix the ✘ items above, then: sudo reboot"

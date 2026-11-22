@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Skyglass OS: labwc as a phone compositor.
+     Every app window opens maximized without a title bar, so it fills the screen like under cage.
+     Maximized (not fullscreen) matters: the on-screen keyboard (squeekboard, a layer-shell
+     panel) reserves its height and labwc shrinks maximized windows above it instead of covering them.
+     The Skyglass shell itself runs fullscreen (chromium kiosk) and has its own keyboard. -->
+<labwc_config>
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+    <reuseOutputMode>yes</reuseOutputMode>
+  </core>
+  <placement>
+    <policy>center</policy>
+  </placement>
+  <theme>
+    <cornerRadius>0</cornerRadius>
+    <dropShadows>no</dropShadows>
+  </theme>
+  <focus>
+    <followMouse>no</followMouse>
+  </focus>
+  <!-- Keybinds defined here replace labwc's defaults (no terminal launcher, no root menu keys).
+       Esc as "back" and the power button are handled by the apps and the Skyglass backend. -->
+  <keyboard>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="A-F4"><action name="Close"/></keybind>
+  </keyboard>
+  <touch mouseEmulation="no"/>
+  <windowRules>
+    <windowRule identifier="*" serverDecoration="no">
+      <action name="Maximize"/>
+    </windowRule>
+  </windowRules>
+</labwc_config>

@@ -1,0 +1,4 @@
+#!/bin/bash
+# hack — look extremely busy. Ctrl+C to stop.
+trap 'tput sgr0; echo; echo "ACCESS GRANTED. (to your own phone. you already had it.)"; exit' INT
+while :; do printf '\e[32m%s\e[0m\n' "$(head -c 300 /dev/urandom | tr -dc 'a-f0-9' | head -c $(( $(tput cols) - 1 )))"; sleep 0.03; done

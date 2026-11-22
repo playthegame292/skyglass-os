@@ -1,0 +1,5 @@
+NAME="Skyglass OS"
+VERSION="1.0 (Bubble)"
+ID=skyglass
+ID_LIKE=debian
+HOME_URL="http://127.0.0.1:7777"

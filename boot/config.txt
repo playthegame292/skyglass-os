@@ -1,0 +1,18 @@
+# Skyglass OS — Raspberry Pi 5 boot config
+[all]
+arm_64bit=1
+auto_initramfs=1
+disable_overscan=1
+disable_splash=1
+dtparam=audio=on
+camera_auto_detect=1
+display_auto_detect=1
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+# Freenove 7" HDMI panel: keep HDMI alive even if the panel is slow to report EDID
+# skyglass-panel
+hdmi_force_hotplug=1
+# PCIe gen 3 makes NVMe HATs faster (harmless otherwise)
+dtparam=pciex1_gen=3
+# Uncomment for a 4G modem HAT on the UART instead of USB:
+#dtoverlay=uart0-pi5

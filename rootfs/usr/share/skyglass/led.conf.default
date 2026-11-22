@@ -1,0 +1,20 @@
+# Skyglass OS: RGB LED (flashlight, status/error light, notification light, party effects)
+# For plain RGB LEDs / modules like the HW-478 (KY-016): pins R, G, B and "-" (common ground).
+# After a change:  sudo systemctl restart skyglass-led   ·   check it:  skyglass-led test
+#
+# LEDS: one "R,G,B" GPIO triple per LED (BCM numbers, not header pin numbers), separated by spaces.
+#   One module (default): R=GPIO17 (pin 11), G=GPIO27 (pin 13), B=GPIO22 (pin 15), "-" to GND (pin 9)
+#   Several modules, each on its own pins, so effects can run across them (chase, police, rainbow):
+#     LEDS="17,27,22 5,6,13 19,26,21 23,24,25"
+#   Several modules in parallel on the same three pins: list one triple, but use transistors (see README).
+#   Empty = no LED.
+LEDS="17,27,22"
+
+# 1 = pin LOW lights the LED: a common-ANODE module ("+" pin) or PNP transistor drivers.
+ACTIVE_LOW=0
+
+# Leave empty to find the 40-pin header's GPIO chip by itself (pinctrl-rp1 on a Pi 5).
+CHIP=
+
+# Who may control the LED through the socket, besides root (the Skyglass user's group)
+SOCKET_GROUP=skyglass

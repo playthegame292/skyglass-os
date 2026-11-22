@@ -1,0 +1,4 @@
+# Skyglass OS: squeekboard pops up by itself whenever an app focuses a text field.
+# A default (not a dconf setting), so it works without a running dconf service.
+[org.gnome.desktop.a11y.applications]
+screen-keyboard-enabled=true

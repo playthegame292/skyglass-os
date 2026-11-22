@@ -1,0 +1,87 @@
+#!/usr/bin/python3
+"""skyglass-led: control the RGB LED (talks to the skyglass-ledd service).
+
+  skyglass-led on [color] [brightness]   flashlight on (white, warm, cold, red… or #rrggbb)
+  skyglass-led off                       flashlight off
+  skyglass-led sos                       flashlight blinks SOS
+  skyglass-led party <effect> [color]    rainbow, disco, candle, police, strobe, chase, pulse, music
+  skyglass-led party off
+  skyglass-led error <name> [text]       red fast blink until cleared   (e.g. from your own scripts)
+  skyglass-led warn <name>               amber blink until cleared
+  skyglass-led clear <layer>             e.g. alert:backup, party, notify, alert:*
+  skyglass-led set <layer> <effect> [color] [speed] [brightness]
+  skyglass-led test                      red, green, blue, white
+  skyglass-led status
+"""
+import json
+import os
+import socket
+import sys
+
+SOCK = os.environ.get("SKYGLASS_LED_SOCK", "/run/skyglass-led/led.sock")
+
+
+def call(cmd):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(4)
+    try:
+        s.connect(SOCK)
+        s.sendall((json.dumps(cmd) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        return json.loads(data or b"{}")
+    except (OSError, ValueError) as e:
+        sys.exit(f"skyglass-led: the LED service isn't running ({e}). Try: sudo systemctl start skyglass-led")
+    finally:
+        s.close()
+
+
+def main(a):
+    if not a or a[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    c, rest = a[0], a[1:]
+    num = lambda i, d: float(rest[i]) if len(rest) > i else d
+    if c == "on":
+        r = call({"cmd": "set", "layer": "flashlight", "effect": "solid", "color": rest[0] if rest else "white",
+                  "brightness": num(1, 1.0)})
+    elif c == "off":
+        r = call({"cmd": "clear", "layer": "flashlight"})
+    elif c == "sos":
+        r = call({"cmd": "set", "layer": "flashlight", "effect": "sos", "color": rest[0] if rest else "white"})
+    elif c == "party":
+        if not rest or rest[0] == "off":
+            r = call({"cmd": "clear", "layer": "party"})
+        else:
+            r = call({"cmd": "set", "layer": "party", "effect": rest[0], "color": rest[1] if len(rest) > 1 else None,
+                      "speed": num(2, 1.0)})
+    elif c == "error" and rest:
+        r = call({"cmd": "set", "layer": "alert:" + rest[0], "effect": "blink-fast", "color": "red", "severity": 1})
+    elif c == "warn" and rest:
+        r = call({"cmd": "set", "layer": "alert:" + rest[0], "effect": "blink", "color": "amber"})
+    elif c == "clear" and rest:
+        r = call({"cmd": "clear", "layer": rest[0]})
+    elif c == "set" and len(rest) >= 2:
+        r = call({"cmd": "set", "layer": rest[0], "effect": rest[1], "color": rest[2] if len(rest) > 2 else None,
+                  "speed": num(3, 1.0), "brightness": num(4, 1.0)})
+    elif c == "test":
+        r = call({"cmd": "test"})
+    elif c == "status":
+        r = call({"cmd": "status"})
+        print(json.dumps(r, indent=2))
+        return 0 if r.get("ok") else 1
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    if not r.get("ok"):
+        print("skyglass-led:", r.get("message", "failed"), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

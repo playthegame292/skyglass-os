@@ -1,0 +1,23 @@
+#!/bin/bash
+# aero — a little bubble aquarium in your terminal. Ctrl+C to leave.
+trap 'tput cnorm; tput sgr0; clear; echo "The fish say bye. ><>"; exit' INT TERM
+tput civis; clear
+cols=$(tput cols); rows=$(tput lines)
+declare -a bx by fx fy fd
+for i in $(seq 0 14); do bx[$i]=$((RANDOM % cols)); by[$i]=$((RANDOM % rows)); done
+for i in 0 1 2 3; do fx[$i]=$((RANDOM % cols)); fy[$i]=$((2 + RANDOM % (rows - 4))); fd[$i]=$(( RANDOM % 2 ? 1 : -1 )); done
+while :; do
+  printf '\e[H\e[48;5;24m\e[2J'
+  for i in "${!bx[@]}"; do
+    by[$i]=$((by[$i] - 1)); [ "${by[$i]}" -lt 1 ] && { by[$i]=$rows; bx[$i]=$((RANDOM % cols)); }
+    printf '\e[%d;%dH\e[38;5;159mo' "${by[$i]}" "$(( bx[$i] + 1 ))"
+  done
+  for i in "${!fx[@]}"; do
+    fx[$i]=$(( fx[$i] + fd[$i] ))
+    [ "${fx[$i]}" -gt $((cols - 5)) ] && fd[$i]=-1; [ "${fx[$i]}" -lt 1 ] && fd[$i]=1
+    if [ "${fd[$i]}" = 1 ]; then f='><>'; else f='<><'; fi
+    printf '\e[%d;%dH\e[38;5;%dm%s' "${fy[$i]}" "${fx[$i]}" $((208 + i * 6)) "$f"
+  done
+  printf '\e[%d;1H\e[38;5;70m%*s' "$rows" "$cols" '' | tr ' ' '~'
+  sleep 0.12
+done
