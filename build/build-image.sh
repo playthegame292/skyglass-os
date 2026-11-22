@@ -4,7 +4,6 @@
 #
 #   sudo ./build/build-image.sh                     -> skyglass-os-YYYYMMDD.img
 #   sudo OUT=my.img SIZE=8G ./build/build-image.sh
-#   sudo SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" ./build/build-image.sh   (enables SSH login)
 #
 # Works on an arm64 host natively, or on x86_64 with qemu-user binfmt.
 # Arch host:   sudo pacman -S --needed debootstrap debian-archive-keyring qemu-user-static qemu-user-static-binfmt dosfstools e2fsprogs rsync
@@ -88,13 +87,6 @@ rm -rf "$R/tmp/skyglass" "$R/usr/sbin/policy-rc.d"
 for m in dev/pts dev proc sys run; do umount -l "$R/$m"; done
 ln -sf ../run/NetworkManager/resolv.conf "$R/etc/resolv.conf"
 
-if [ -n "${SSH_PUBKEY:-}" ]; then
-  echo "==> Installing SSH key"
-  install -d -m 700 "$WORK/rootfs/home/skyglass/.ssh"
-  echo "$SSH_PUBKEY" >"$WORK/rootfs/home/skyglass/.ssh/authorized_keys"
-  chmod 600 "$WORK/rootfs/home/skyglass/.ssh/authorized_keys"
-  chroot "$WORK/rootfs" chown -R skyglass:skyglass /home/skyglass/.ssh
-fi
 
 echo "==> Creating $SIZE image"
 rm -f "$OUT"; truncate -s "$SIZE" "$OUT"

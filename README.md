@@ -279,7 +279,7 @@ On any Linux PC (x86_64 works through qemu):
 sudo ./build/build-image.sh     # or just: sudo ./flash.sh
 ```
 
-Add `SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"` to log in over SSH. SSH won't accept an empty password, so key login is the only remote way in. On first boot the root partition grows to fill the card.
+On first boot the root partition grows to fill the card.
 
 `WITH_ANDROID=1 sudo ./build/build-image.sh` also puts the 4K-page kernel (`kernel8.img`) on the card, so Android setup has no kernel to download. The phone still boots the default kernel until you run `skyglass-android setup`.
 
